@@ -29,5 +29,5 @@ This document outlines the core policies, design patterns, and operational knowl
     * `ERROR/CRITICAL`: Use for exceptions, failed folder creations, and stack traces.
 
 ## 5. Living Document Policy
-* **Continuous Updates:** This `AGENTS.md` file is a living document. Any agent working on this codebase is strictly instructed to update this file whenever new design patterns are established, new core modules are integrated, or significant project policies/rules are uncovered. 
 * **Knowledge Preservation:** If you discover a "gotcha", a repeated requirement, or a useful piece of project context that would benefit future agents, you must document it here immediately to ensure continuous knowledge preservation.
+* **Open Interpreter Dependency Gotcha:** When calling `OpenInterpreter` from within a Python script (especially if `open-interpreter` was installed via `pipx`), Open Interpreter will attempt to use the script's `sys.executable` to spawn Jupyter kernels. If the system Python environment running the script does not have `ipykernel` installed, Open Interpreter will **hang silently forever** when asked to execute Python code. Always ensure `python -m pip install ipykernel` has been run on the host Python.

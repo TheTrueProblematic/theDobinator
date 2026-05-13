@@ -4,6 +4,8 @@ import ctypes
 import string
 import logging
 import csv
+import shutil
+import subprocess
 
 # --- Logging Setup ---
 # Find the project root by going up one level from the 'src' directory
@@ -16,6 +18,30 @@ if not os.path.exists(LOGS_DIR):
     os.makedirs(LOGS_DIR)
 
 LOG_FILE = os.path.join(LOGS_DIR, "dobLog.log")
+PREV_LOG_FILE = os.path.join(LOGS_DIR, "dobLogPrev.log")
+RUN_SEPARATOR = "\n" + "="*50 + " END OF RUN " + "="*50 + "\n"
+
+# Maintain the past 5 logs in dobLogPrev.log
+if os.path.exists(LOG_FILE):
+    try:
+        with open(LOG_FILE, 'r', encoding='utf-8', errors='replace') as f:
+            last_run_log = f.read().strip()
+            
+        if last_run_log:
+            prev_logs = []
+            if os.path.exists(PREV_LOG_FILE):
+                with open(PREV_LOG_FILE, 'r', encoding='utf-8', errors='replace') as f:
+                    content = f.read()
+                    prev_logs = [log.strip() for log in content.split(RUN_SEPARATOR) if log.strip()]
+            
+            # Keep the last 4 logs, then add the most recent run
+            prev_logs = prev_logs[-4:]
+            prev_logs.append(last_run_log)
+            
+            with open(PREV_LOG_FILE, 'w', encoding='utf-8') as f:
+                f.write(RUN_SEPARATOR.join(prev_logs) + RUN_SEPARATOR)
+    except Exception as e:
+        print(f"Failed to update previous logs: {e}")
 
 # Configure logging to write to the file (resetting every run with mode='w')
 # and also output to the console.
@@ -23,7 +49,7 @@ logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler(LOG_FILE, mode='w'),
+        logging.FileHandler(LOG_FILE, mode='w', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -103,13 +129,13 @@ class LLM:
         self.context_window = context_window
         self.api_key = api_key
         self.max_tokens = max_tokens
-        
+        import sys
+        import os
+
         # Try to import open-interpreter, with a fallback to the common pipx installation path
         try:
             from interpreter import OpenInterpreter
         except ImportError:
-            import sys
-            import os
             # Expand ~ to the user's home directory to find the pipx environment
             pipx_path = os.path.expanduser(r"~\pipx\venvs\open-interpreter\Lib\site-packages")
             if os.path.exists(pipx_path) and pipx_path not in sys.path:
@@ -199,20 +225,116 @@ def classifyRegion(llm_instance, drive_path, work_vars):
     # Type your prompt for the LLM here. 
     # The LLM will run with 'drive_path' as its working directory.
     prompt = (
-        "Look at the packfiles.txt file on the drive and determine the region it belongs to (US or International)."
-        "Once determined, update the 'Region' row in the 'dobDir/workVars.csv' file to be a single letter (U for US or I for International)."
-        "For context, it is currently set to X but it should be changed to U or I depending on your findings."
-        "Do not output any other text, only the letter U or I."
+        "Look at the packfiles.txt file in this folder and determine the region it belongs to (US or International). Once determined, rename packfiles.txt to either packfiles-I.txt (for international) or packfiles-U.txt (for US). "
     )
     # ========================================================================
     
     logging.info(f"Sending prompt to LLM: '{prompt}'")
     llm_instance.useLoc(prompt, drive_path)
     
+    # Check for renamed files and process accordingly
+    packfiles_u_path = os.path.join(drive_path, "packfiles-U.txt")
+    packfiles_i_path = os.path.join(drive_path, "packfiles-I.txt")
+    original_packfiles_path = os.path.join(drive_path, "packfiles.txt")
+    
+    region_determined = None
+    if os.path.exists(packfiles_u_path):
+        region_determined = "U"
+        os.rename(packfiles_u_path, original_packfiles_path)
+    elif os.path.exists(packfiles_i_path):
+        region_determined = "I"
+        os.rename(packfiles_i_path, original_packfiles_path)
+        
+    if region_determined:
+        logging.info(f"LLM successfully renamed packfiles. Region is: {region_determined}")
+        work_vars.remove_row("Region")
+        work_vars.add_row("Region", region_determined)
+    else:
+        logging.warning("LLM failed to rename packfiles.txt to indicate region.")
+    
     # Read the region value again to log the result
     region_after = work_vars.get_data_by_name("Region")
     logging.info(f"Region AFTER LLM processing: {region_after}")
     logging.info("--- Finished Region Classification ---")
+
+def copy_region_files(drive_path, work_vars):
+    """
+    Copies the appropriate files to the drive based on the identified region.
+    """
+    logging.info("--- Starting File Copy Process ---")
+    region = work_vars.get_data_by_name("Region")
+    
+    if not region or region == "x":
+        logging.error("Region not properly identified. Cannot proceed with file copying.")
+        return
+
+    commands = []
+    
+    if region == "u":
+        commands = [
+            ["robocopy", r"U:\ARS\Data\vector\Baseline\_all_installs", os.path.join(drive_path, r"ARS\data\vector")],
+            ["robocopy", r"U:\ARS\Data\vector\Baseline\usa", os.path.join(drive_path, r"ARS\data\vector")],
+            ["robocopy", r"G:\Shared drives\ARS\bin", os.path.join(drive_path, r"ARS\bin"), "/e"],
+            ["robocopy", r"G:\Shared drives\ARS\data", os.path.join(drive_path, r"ARS\data"), "/e"],
+            ["robocopy", r"U:\ARS\Data\imagery\usa", os.path.join(drive_path, r"ARS\data\imagery"), "usa_faa*"],
+            ["robocopy", r"U:\ARS\Data\imagery\GLOBAL", os.path.join(drive_path, r"ARS\data\imagery"), "BlueMarble.esp"],
+            ["robocopy", r"U:\ARS\Data\imagery\GLOBAL", os.path.join(drive_path, r"ARS\data\imagery"), "HYP_HR_SR_W_DR.esp"],
+            ["robocopy", r"U:\ARS\Data\imagery\usa", os.path.join(drive_path, r"ARS\data\imagery"), "terrain_usa_CONUS*.esp"],
+            ["robocopy", r"U:\ARS\Data\imagery\GLOBAL", os.path.join(drive_path, r"ARS\data\imagery"), "terrain_Global_SRTM3_90M.esp"],
+            ["robocopy", r"U:\ARS\Data\imagery\usa", os.path.join(drive_path, r"ARS\data\imagery"), "usgs_drg.esp"],
+            ["robocopy", r"U:\ARS\Data\geocode\usa", os.path.join(drive_path, r"ARS\Data\geocode\usa")],
+            ["robocopy", r"U:\ARS\Data\geocode\__global", os.path.join(drive_path, r"ARS\Data\geocode\__global")],
+            ["robocopy", r"U:\ARS\Data\Geocoders", os.path.join(drive_path, r"ARS\Data\Geocoders")]
+        ]
+    elif region == "i":
+        commands = [
+            ["robocopy", r"U:\ARS\Data\vector\Baseline\_all_installs", os.path.join(drive_path, r"ARS\data\vector")],
+            ["robocopy", r"G:\Shared drives\ARS\bin", os.path.join(drive_path, r"ARS\bin"), "/e"],
+            ["robocopy", r"G:\Shared drives\ARS\data", os.path.join(drive_path, r"ARS\data"), "/e"],
+            ["robocopy", r"U:\ARS\Data\imagery\GLOBAL", os.path.join(drive_path, r"ARS\data\imagery"), "BlueMarble.esp"],
+            ["robocopy", r"U:\ARS\Data\imagery\GLOBAL", os.path.join(drive_path, r"ARS\data\imagery"), "HYP_HR_SR_W_DR.esp"],
+            ["robocopy", r"U:\ARS\Data\imagery\GLOBAL", os.path.join(drive_path, r"ARS\data\imagery"), "terrain_Global_SRTM3_90M.esp"],
+            ["robocopy", r"U:\ARS\Data\geocode\__global", os.path.join(drive_path, r"ARS\data\geocode\__global")],
+            ["robocopy", r"U:\ARS\Data\geocoders", os.path.join(drive_path, r"ARS\data\geocoders")]
+        ]
+    else:
+        logging.warning(f"Unknown region '{region}', unable to copy files.")
+        return
+
+    logging.info(f"Starting file copy for region '{region}' to drive {drive_path}")
+
+    # Generate a reference batch file in dobDir
+    dobdir_path = os.path.join(drive_path, "dobDir")
+    bat_file_path = os.path.join(dobdir_path, "copy_files.bat")
+    try:
+        with open(bat_file_path, "w") as f:
+            for cmd in commands:
+                quoted_cmd = []
+                for arg in cmd:
+                    if " " in arg:
+                        quoted_cmd.append(f'"{arg}"')
+                    else:
+                        quoted_cmd.append(arg)
+                f.write(" ".join(quoted_cmd) + "\n")
+            f.write("pause\n")
+        logging.debug(f"Created reference batch file at {bat_file_path}")
+    except Exception as e:
+        logging.error(f"Failed to create temporary batch file {bat_file_path}: {e}")
+
+    for cmd in commands:
+        cmd_str = " ".join(cmd)
+        logging.info(f"Running command: {cmd_str}")
+        try:
+            # 0x08000000 is CREATE_NO_WINDOW
+            result = subprocess.run(cmd, capture_output=True, text=True, creationflags=0x08000000)
+            if result.returncode >= 8:
+                logging.error(f"Robocopy failed with exit code {result.returncode}: {result.stderr or result.stdout}")
+            else:
+                logging.info(f"Robocopy completed with exit code {result.returncode}")
+        except Exception as e:
+            logging.error(f"Failed to execute robocopy command: {e}")
+
+    logging.info("--- Finished File Copy Process ---")
 
 def process_drive(drive_path):
     """Process a newly connected drive."""
@@ -231,16 +353,22 @@ def process_drive(drive_path):
     
     # Create the dobDir folder on the root of the drive
     logging.debug(f"Checking if dobDir exists at: {dobdir_path}")
-    if not os.path.exists(dobdir_path):
-        logging.info(f"dobDir does not exist on {drive_path}. Attempting to create it...")
+    if os.path.exists(dobdir_path):
+        logging.info(f"Directory {dobdir_path} already exists. Deleting it first...")
         try:
-            os.makedirs(dobdir_path)
-            logging.info(f"SUCCESS: Created directory {dobdir_path}")
+            shutil.rmtree(dobdir_path)
+            logging.info(f"SUCCESS: Deleted existing directory {dobdir_path}")
         except Exception as e:
-            logging.error(f"FAILED to create directory {dobdir_path}. Exception details: {e}")
+            logging.error(f"FAILED to delete existing directory {dobdir_path}. Exception details: {e}")
             return
-    else:
-        logging.info(f"Directory {dobdir_path} already exists. No creation necessary.")
+            
+    logging.info(f"Attempting to create dobDir on {drive_path}...")
+    try:
+        os.makedirs(dobdir_path)
+        logging.info(f"SUCCESS: Created directory {dobdir_path}")
+    except Exception as e:
+        logging.error(f"FAILED to create directory {dobdir_path}. Exception details: {e}")
+        return
 
     # ========================================================================
     # CLEAR COMMENT MARKER FOR FURTHER PROCESSING
@@ -257,6 +385,9 @@ def process_drive(drive_path):
     # Instantiate the LLM and run the classifyRegion function
     dobsy = LLM()
     classifyRegion(dobsy, drive_path, work_vars)
+    
+    # Run the file copy process
+    copy_region_files(drive_path, work_vars)
     
     logging.info(f"========== Finished initial processing for {drive_path} ==========")
 
