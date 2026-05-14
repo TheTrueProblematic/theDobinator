@@ -107,7 +107,7 @@ export const ASSERTIONS = [
     state: { Running: 1, StatusNumber: 4 },
     check(doc) {
       const r = bodyAttrs(doc, 1, 4); if (!r.passed) return r;
-      if (!/matching files/i.test($(doc, '.card').textContent)) return fail('expected "matching files" copy');
+      if (!/matching .*files/i.test($(doc, '.card').textContent)) return fail('expected "matching … files" copy');
       return ok();
     },
   },

@@ -44,15 +44,53 @@ if os.path.exists(LOG_FILE):
     except Exception as e:
         print(f"Failed to update previous logs: {e}")
 
+class LessNoiseFilter(logging.Filter):
+    def filter(self, record):
+        noisy_loggers = ('litellm', 'openai', 'httpx', 'httpcore', 'asyncio', 'markdown_it', 'interpreter', 'urllib3')
+        if record.name.startswith(noisy_loggers):
+            if record.levelno < logging.INFO:
+                return False
+            
+        msg = str(record.getMessage())
+        if 'fake_key' in msg or 'invalid_api_key' in msg:
+            return False
+            
+        noisy_strings = [
+            'model_response.choices',
+            'Using proactor:',
+            'LiteLLM-Async Success Call',
+            'LiteLLM-Success Call',
+            'RAW RESPONSE:',
+            'Received openai error',
+            'entering code: StateBlock',
+            'entering fence: StateBlock',
+            'entering blockquote: StateBlock',
+            'entering hr: StateBlock',
+            'entering list: StateBlock',
+            'entering reference: StateBlock',
+            'entering html_block: StateBlock',
+            'entering heading: StateBlock',
+            'entering lheading: StateBlock',
+            'entering paragraph: StateBlock'
+        ]
+        for s in noisy_strings:
+            if s in msg:
+                return False
+        return True
+
+file_handler = logging.FileHandler(LOG_FILE, mode='w', encoding='utf-8')
+stream_handler = logging.StreamHandler()
+
+noise_filter = LessNoiseFilter()
+file_handler.addFilter(noise_filter)
+stream_handler.addFilter(noise_filter)
+
 # Configure logging to write to the file (resetting every run with mode='w')
 # and also output to the console.
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE, mode='w', encoding='utf-8'),
-        logging.StreamHandler()
-    ]
+    handlers=[file_handler, stream_handler]
 )
 
 STATUS_FILE = os.path.join(PROJECT_ROOT, "srvr", "status.json")

@@ -65,7 +65,7 @@ function spinnerHeadline(text) {
     <div class="eyebrow"><span class="eyebrow-dot"></span> Working</div>
     <h1 class="headline">
       ${ICONS.spinner}
-      <span>${esc(text)}<span class="dots"></span></span>
+      <span>${esc(text)}<span class="dots"><span>.</span><span>.</span><span>.</span></span></span>
     </h1>`;
 }
 
@@ -73,7 +73,7 @@ function radarHeadline(text) {
   return `
     <div class="radar"><span class="radar-core"></span></div>
     <div class="eyebrow"><span class="eyebrow-dot"></span> Standing by</div>
-    <h1 class="headline"><span>${esc(text)}<span class="dots"></span></span></h1>
+    <h1 class="headline"><span>${esc(text)}<span class="dots"><span>.</span><span>.</span><span>.</span></span></span></h1>
     <p class="subline">Plug in a drive to begin.</p>`;
 }
 
@@ -94,7 +94,8 @@ function screenForState(state) {
       return {
         cardClass: '',
         inner: spinnerHeadline(STATUS_LABELS[2]) +
-          `<p class="subline">Figuring out which set of files this drive needs.</p>`
+          `<p class="subline">Figuring out which set of files this drive needs.<br/>
+            <em class="hint">The AI is thinking — this may take a while.</em></p>`
       };
 
     case 3:
@@ -109,7 +110,8 @@ function screenForState(state) {
       return {
         cardClass: '',
         inner: spinnerHeadline(STATUS_LABELS[4]) +
-          `<p class="subline">Working out where every file should go.</p>`
+          `<p class="subline">Working out where every file should go.<br/>
+            <em class="hint">The AI is thinking — this may take a while.</em></p>`
       };
 
     case 5:
@@ -127,8 +129,8 @@ function screenForState(state) {
           <div class="status-icon is-danger">${ICONS.alert}</div>
           <div class="eyebrow"><span class="eyebrow-dot"></span> Heads up</div>
           <h1 class="headline"><span>${esc(STATUS_LABELS[6])}</span></h1>
-          <p class="subline">Creating documentation<span class="dots"></span><br/>
-            Hold on while the details get written down.</p>` };
+          <p class="subline">Creating documentation<span class="dots"><span>.</span><span>.</span><span>.</span></span><br/>
+            Hold on while the details get written down. This may take a while.</p>` };
 
     case 10:
       return {
@@ -161,8 +163,8 @@ function renderOff(stage) {
   stage.innerHTML = `
     <div class="off-screen fade-enter" data-screen="off">
       The Dobinator is not running
-      <span class="off-sub">Press the power button to start</span>
-    </div>`;
+    </div>
+    <div class="off-foot" data-screen="off-foot">Press the power button to start</div>`;
 }
 
 function renderError(stage, state) {
