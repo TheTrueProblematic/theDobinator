@@ -336,6 +336,58 @@ def copy_region_files(drive_path, work_vars):
 
     logging.info("--- Finished File Copy Process ---")
 
+def matchFiles(drive_path):
+    """
+    Instructs the AI on how to actually find the rest of the files.
+    Creates a new LLM instance with the working directory on the root of the processing drive.
+    """
+    logging.info("--- Starting matchFiles Process ---")
+    
+    # Create a new LLM object with its working directory on the root of the drive
+    match_llm = LLM(working_directory=drive_path)
+    
+    prompt = (
+        "You are currently on the root of a drive that has some data on it, but needs even more. "
+        "Currently, it has a file called packfiles.txt, a dobDir folder, and an ARS folder. "
+        "In that ARS folder is another subfolder called data. In that data folder are a variety "
+        "of folders with different types of data in them.\n\n"
+        "In packfiles.txt all of the data files are listed out with their paths relative to the data "
+        "folder (in the ARS folder). Some are already on this drive (for example "
+        "\"data\\imagery\\BlueMarble.esp\" is already on this drive under \"ARS\\data...\". "
+        "The rest of the files that are not yet on this drive can be found in the subfolders of the U "
+        "drive at \"U:\\ARS\\Data\\...\". Matching them up is a bit more complicated than it may seem, "
+        "however, because the folder structure on U does not match where those files will end up on this "
+        "drive. Additionally, the files can be renamed slightly from what they were called before when "
+        "this packfiles.txt document was made.\n\n"
+        "Your goal, is to create a new csv file in dobDir called \"mapping.csv\" that has both the source "
+        "paths of all of the remaining files, as well as the destination paths of all of these files. "
+        "There should be no header or title rows or columns but only the matched pairs of the source and "
+        "destination paths.\n\n"
+        "For example, if this is listed in packfiles.txt: "
+        "data\\vector\\n_can-on-ottawa_police_neighborhoods_polygons_t_polygon_c_20250728.esp\n"
+        "You would need a row in the csv like this:\n"
+        "U:\\ARS\\Data\\vector\\LIMITED_DISTRIBUTION\\can-on_OttawaPolice\\n_can-on-ottawa_police_neighborhoods_polygons_t_polygon_c_20250728.esp, D:ARS\\data\\vector\\n_can-on-ottawa_police_neighborhoods_polygons_t_polygon_c_20250728.esp\n\n"
+        "Additionally, for another example, if you saw this listed in packfiles.txt: "
+        "data\\geocode\\can\\can2025_06_mn_pd_ph_2025-08-29.voc\n"
+        "You may need a row in the csv that looks like this:\n"
+        "U:\\ARS\\Data\\geocode\\can\\can2025_12_mn_pd_ph_2026-02-17.voc, D:ARS\\data\\geocode\\can\\can2025_12_mn_pd_ph_2026-02-17.voc\n"
+        "Note that even though the date in the packfiles list is older, we found the newer date and listed "
+        "it exactly as is to be transferred since we will want this newer data set (keep the new name).\n\n"
+        "Finally, something to note is that for geocode, you are generally looking for a whole folder of "
+        "data to copy over from the U drive. For example, for a canada drive, we might see multiple things "
+        "in packfiles listed starting with \"data\\geocode\\can\\...\". You can then quickly check if "
+        "everything under \"U:\\ARS\\Data\\geocode\\can\\...\" generally matches (except for dates and such), "
+        "and just copy that whole directory over.\n\n"
+        "ALSO NOTE! This csv will be fed into a python script that will run robocopy on it. Make sure the "
+        "names are exactly right and that there is no fluff. Things must be perfectly formatted such that "
+        "python can interpret this list and robocopy the files. Also note that robocopy supports directories "
+        "if applicable (see previous note)."
+    )
+    logging.info(f"Sending prompt to LLM in matchFiles: '{prompt}'")
+    match_llm.use(prompt)
+    
+    logging.info("--- Finished matchFiles Process ---")
+
 def process_drive(drive_path):
     """Process a newly connected drive."""
     logging.info(f"========== Starting processing for newly detected drive: {drive_path} ==========")
@@ -388,6 +440,16 @@ def process_drive(drive_path):
     
     # Run the file copy process
     copy_region_files(drive_path, work_vars)
+    
+    # Run the matchFiles process to find the rest of the files
+    matchFiles(drive_path)
+    
+    logging.info(f"Cleaning up {dobdir_path}...")
+    try:
+        shutil.rmtree(dobdir_path)
+        logging.info(f"SUCCESS: Deleted directory {dobdir_path}")
+    except Exception as e:
+        logging.error(f"FAILED to delete directory {dobdir_path}. Exception details: {e}")
     
     logging.info(f"========== Finished initial processing for {drive_path} ==========")
 
