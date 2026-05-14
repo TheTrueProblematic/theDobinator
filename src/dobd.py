@@ -321,6 +321,10 @@ def copy_region_files(drive_path, work_vars):
     except Exception as e:
         logging.error(f"Failed to create temporary batch file {bat_file_path}: {e}")
 
+    totalBaseFiles = len(commands)
+    completedBaseFiles = 0
+    logging.info(f"Total base items to copy (totalBaseFiles): {totalBaseFiles}")
+
     for cmd in commands:
         cmd_str = " ".join(cmd)
         logging.info(f"Running command: {cmd_str}")
@@ -330,11 +334,12 @@ def copy_region_files(drive_path, work_vars):
             if result.returncode >= 8:
                 logging.error(f"Robocopy failed with exit code {result.returncode}: {result.stderr or result.stdout}")
             else:
-                logging.info(f"Robocopy completed with exit code {result.returncode}")
+                completedBaseFiles += 1
+                logging.info(f"Robocopy completed with exit code {result.returncode}. Completed: {completedBaseFiles}/{totalBaseFiles}")
         except Exception as e:
             logging.error(f"Failed to execute robocopy command: {e}")
 
-    logging.info("--- Finished File Copy Process ---")
+    logging.info(f"--- Finished File Copy Process. Successfully copied {completedBaseFiles} out of {totalBaseFiles} items. ---")
 
 def matchFiles(drive_path):
     """
@@ -387,6 +392,157 @@ def matchFiles(drive_path):
     match_llm.use(prompt)
     
     logging.info("--- Finished matchFiles Process ---")
+
+def mainCopy(drive_path):
+    """
+    Reads the mapping.csv created by matchFiles and copies the files using robocopy.
+    Tracks total and completed files, and logs any errors to ISSUES.txt.
+    """
+    logging.info("--- Starting mainCopy Process ---")
+    dobdir_path = os.path.join(drive_path, "dobDir")
+    mapping_csv = os.path.join(dobdir_path, "mapping.csv")
+    issues_txt = os.path.join(dobdir_path, "ISSUES.txt")
+    
+    if not os.path.exists(mapping_csv):
+        logging.error(f"mapping.csv not found at {mapping_csv}. Cannot proceed with mainCopy.")
+        return
+        
+    try:
+        with open(mapping_csv, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            # Remove empty rows and keep only those with at least source and destination
+            rows = [row for row in reader if row and len(row) >= 2]
+    except Exception as e:
+        logging.error(f"Failed to read {mapping_csv}: {e}")
+        return
+        
+    totalMainFiles = len(rows)
+    completedMainFiles = 0
+    errors_encountered = []
+    
+    logging.info(f"Total items to copy (totalMainFiles): {totalMainFiles}")
+    
+    for row in rows:
+        source_path = row[0].strip()
+        dest_path = row[1].strip()
+        
+        logging.debug(f"Processing copy from {source_path} to {dest_path}")
+        
+        if not os.path.exists(source_path):
+            error_msg = f"Source path does not exist: {source_path}"
+            logging.error(error_msg)
+            errors_encountered.append(f"{error_msg} (Destination was: {dest_path})")
+            continue
+            
+        cmd = []
+        if os.path.isdir(source_path):
+            # If it's a directory, use the /E flag for recursive copy
+            cmd = ["robocopy", source_path, dest_path, "/e"]
+        else:
+            # If it's a file, split into dir and filename for robocopy
+            source_dir = os.path.dirname(source_path)
+            dest_dir = os.path.dirname(dest_path)
+            filename = os.path.basename(source_path)
+            cmd = ["robocopy", source_dir, dest_dir, filename]
+            
+        cmd_str = " ".join([f'"{x}"' if ' ' in x else x for x in cmd])
+        logging.info(f"Running command: {cmd_str}")
+        
+        try:
+            # 0x08000000 is CREATE_NO_WINDOW
+            result = subprocess.run(cmd, capture_output=True, text=True, creationflags=0x08000000)
+            if result.returncode >= 8:
+                error_msg = f"Robocopy failed for {source_path} with exit code {result.returncode}: {result.stderr or result.stdout}"
+                logging.error(error_msg)
+                errors_encountered.append(error_msg)
+            else:
+                completedMainFiles += 1
+                logging.debug(f"Successfully copied {source_path}. Completed: {completedMainFiles}/{totalMainFiles}")
+        except Exception as e:
+            error_msg = f"Exception occurred while trying to copy {source_path}: {e}"
+            logging.error(error_msg)
+            errors_encountered.append(error_msg)
+            
+    logging.info(f"mainCopy process completed. Successfully copied {completedMainFiles} out of {totalMainFiles} items.")
+    
+    if errors_encountered:
+        logging.warning(f"Writing {len(errors_encountered)} errors to {issues_txt}")
+        try:
+            with open(issues_txt, 'w', encoding='utf-8') as f:
+                f.write(f"Errors encountered during mainCopy on {time.strftime('%Y-%m-%d %H:%M:%S')}:\n")
+                f.write("-" * 50 + "\n")
+                for err in errors_encountered:
+                    f.write(err + "\n")
+        except Exception as e:
+            logging.error(f"Failed to write to {issues_txt}: {e}")
+            
+    logging.info("--- Finished mainCopy Process ---")
+
+def summarizeIssues(drive_path):
+    """
+    Summarizes the issues logged in ISSUES.txt using the LLM.
+    Moves the resulting ISSUES.md to the root of the drive.
+    """
+    logging.info("--- Starting summarizeIssues Process ---")
+    dobdir_path = os.path.join(drive_path, "dobDir")
+    issues_txt = os.path.join(dobdir_path, "ISSUES.txt")
+    
+    if not os.path.exists(issues_txt):
+        logging.info("No ISSUES.txt found to summarize.")
+        return
+        
+    summary_llm = LLM(working_directory=dobdir_path)
+    
+    prompt = (
+        "You are being run in a folder that contains a file called ISSUES.txt. "
+        "This file is a verbose log of issues encountered during the automated copying of files by a program called \"The Dobinator\". "
+        "Your task is to read through this log and then summarize the issues in human readable text. "
+        "The goal is to have a few short sentences describing what happened (what wasn't copied, etc). "
+        "If certain files weren't copied, they should all be listed too. "
+        "The goal is for someone to be able to easily read this and clean up the issues by hand. "
+        "This summary should always start with\n\n"
+        "Hello from The Dobinator, I seem to have encountered some issues while building this data drive. :(\n"
+        "The issue was/The issues were...\n\n"
+        "The summary should also all be in the first person as The Dobinator. "
+        "This summary should be saved and formatted into a file in this folder called \"ISSUES.md\"."
+    )
+    
+    logging.info("Sending prompt to LLM to summarize issues...")
+    summary_llm.use(prompt)
+    
+    # After prompt, move ISSUES.md to root of the drive
+    issues_md = os.path.join(dobdir_path, "ISSUES.md")
+    root_issues_md = os.path.join(drive_path, "ISSUES.md")
+    
+    if os.path.exists(issues_md):
+        try:
+            # Overwrite if it already exists on the root
+            if os.path.exists(root_issues_md):
+                os.remove(root_issues_md)
+            shutil.move(issues_md, root_issues_md)
+            logging.info(f"Successfully moved ISSUES.md to {root_issues_md}")
+        except Exception as e:
+            logging.error(f"Failed to move ISSUES.md to root: {e}")
+    else:
+        logging.warning("LLM did not create ISSUES.md as requested.")
+        
+    logging.info("--- Finished summarizeIssues Process ---")
+
+def verifySuccess(drive_path):
+    """
+    Checks for ISSUES.txt and runs summarizeIssues if it exists.
+    """
+    logging.info("--- Starting verifySuccess Process ---")
+    dobdir_path = os.path.join(drive_path, "dobDir")
+    issues_txt = os.path.join(dobdir_path, "ISSUES.txt")
+    
+    if os.path.exists(issues_txt):
+        logging.warning("ISSUES.txt found! Running summarizeIssues.")
+        summarizeIssues(drive_path)
+    else:
+        logging.info("No ISSUES.txt found. All copies were successful!")
+        
+    logging.info("--- Finished verifySuccess Process ---")
 
 def process_drive(drive_path):
     """Process a newly connected drive."""
@@ -443,6 +599,12 @@ def process_drive(drive_path):
     
     # Run the matchFiles process to find the rest of the files
     matchFiles(drive_path)
+    
+    # Run the mainCopy process
+    mainCopy(drive_path)
+    
+    # Verify success and handle issues
+    verifySuccess(drive_path)
     
     logging.info(f"Cleaning up {dobdir_path}...")
     try:
