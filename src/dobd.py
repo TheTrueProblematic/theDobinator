@@ -6,6 +6,7 @@ import logging
 import csv
 import shutil
 import subprocess
+import json
 
 # --- Logging Setup ---
 # Find the project root by going up one level from the 'src' directory
@@ -53,6 +54,59 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
+
+STATUS_FILE = os.path.join(PROJECT_ROOT, "srvr", "status.json")
+
+class StatusManager:
+    """Manages the status.json file for tracking program state."""
+    def __init__(self, filepath):
+        self.filepath = filepath
+        os.makedirs(os.path.dirname(self.filepath), exist_ok=True)
+
+    def _read_data(self):
+        data = {
+            "StatusNumber": 0,
+            "TotalBaseFiles": -1,
+            "CompletedBaseFiles": -1,
+            "TotalMainFiles": -1,
+            "CompletedMainFiles": -1,
+            "Running": 1
+        }
+        if os.path.exists(self.filepath):
+            try:
+                with open(self.filepath, 'r', encoding='utf-8') as f:
+                    data.update(json.load(f))
+            except Exception as e:
+                pass
+        return data
+
+    def _write_data(self, data):
+        try:
+            with open(self.filepath, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=4)
+        except Exception as e:
+            logging.error(f"Failed to write status to {self.filepath}: {e}")
+
+    def update(self, status_number=None, total_base=None, comp_base=None, total_main=None, comp_main=None, running=None):
+        data = self._read_data()
+        
+        if status_number is not None:
+            data["StatusNumber"] = status_number
+            if status_number == 0:
+                data["TotalBaseFiles"] = -1
+                data["CompletedBaseFiles"] = -1
+                data["TotalMainFiles"] = -1
+                data["CompletedMainFiles"] = -1
+                
+        if total_base is not None: data["TotalBaseFiles"] = total_base
+        if comp_base is not None: data["CompletedBaseFiles"] = comp_base
+        if total_main is not None: data["TotalMainFiles"] = total_main
+        if comp_main is not None: data["CompletedMainFiles"] = comp_main
+        if running is not None: data["Running"] = running
+        
+        self._write_data(data)
+
+status_mgr = StatusManager(STATUS_FILE)
 
 class WorkVars:
     """Manages the workVars.csv file in the dobDir directory."""
@@ -213,6 +267,7 @@ def classifyRegion(llm_instance, drive_path, work_vars):
     The LLM has access to the drive and is instructed to update the Region variable 
     in the dobDir/workVars.csv file based on its findings.
     """
+    status_mgr.update(status_number=2)
     logging.info("--- Starting Region Classification ---")
     
     # Read the current region value and log it before the LLM runs
@@ -261,6 +316,7 @@ def copy_region_files(drive_path, work_vars):
     """
     Copies the appropriate files to the drive based on the identified region.
     """
+    status_mgr.update(status_number=3)
     logging.info("--- Starting File Copy Process ---")
     region = work_vars.get_data_by_name("Region")
     
@@ -323,6 +379,7 @@ def copy_region_files(drive_path, work_vars):
 
     totalBaseFiles = len(commands)
     completedBaseFiles = 0
+    status_mgr.update(total_base=totalBaseFiles, comp_base=0)
     logging.info(f"Total base items to copy (totalBaseFiles): {totalBaseFiles}")
 
     for cmd in commands:
@@ -335,6 +392,7 @@ def copy_region_files(drive_path, work_vars):
                 logging.error(f"Robocopy failed with exit code {result.returncode}: {result.stderr or result.stdout}")
             else:
                 completedBaseFiles += 1
+                status_mgr.update(comp_base=completedBaseFiles)
                 logging.info(f"Robocopy completed with exit code {result.returncode}. Completed: {completedBaseFiles}/{totalBaseFiles}")
         except Exception as e:
             logging.error(f"Failed to execute robocopy command: {e}")
@@ -346,6 +404,7 @@ def matchFiles(drive_path):
     Instructs the AI on how to actually find the rest of the files.
     Creates a new LLM instance with the working directory on the root of the processing drive.
     """
+    status_mgr.update(status_number=4)
     logging.info("--- Starting matchFiles Process ---")
     
     # Create a new LLM object with its working directory on the root of the drive
@@ -398,6 +457,7 @@ def mainCopy(drive_path):
     Reads the mapping.csv created by matchFiles and copies the files using robocopy.
     Tracks total and completed files, and logs any errors to ISSUES.txt.
     """
+    status_mgr.update(status_number=5)
     logging.info("--- Starting mainCopy Process ---")
     dobdir_path = os.path.join(drive_path, "dobDir")
     mapping_csv = os.path.join(dobdir_path, "mapping.csv")
@@ -418,6 +478,7 @@ def mainCopy(drive_path):
         
     totalMainFiles = len(rows)
     completedMainFiles = 0
+    status_mgr.update(total_main=totalMainFiles, comp_main=0)
     errors_encountered = []
     
     logging.info(f"Total items to copy (totalMainFiles): {totalMainFiles}")
@@ -457,6 +518,7 @@ def mainCopy(drive_path):
                 errors_encountered.append(error_msg)
             else:
                 completedMainFiles += 1
+                status_mgr.update(comp_main=completedMainFiles)
                 logging.debug(f"Successfully copied {source_path}. Completed: {completedMainFiles}/{totalMainFiles}")
         except Exception as e:
             error_msg = f"Exception occurred while trying to copy {source_path}: {e}"
@@ -483,6 +545,7 @@ def summarizeIssues(drive_path):
     Summarizes the issues logged in ISSUES.txt using the LLM.
     Moves the resulting ISSUES.md to the root of the drive.
     """
+    status_mgr.update(status_number=6)
     logging.info("--- Starting summarizeIssues Process ---")
     dobdir_path = os.path.join(drive_path, "dobDir")
     issues_txt = os.path.join(dobdir_path, "ISSUES.txt")
@@ -531,18 +594,22 @@ def summarizeIssues(drive_path):
 def verifySuccess(drive_path):
     """
     Checks for ISSUES.txt and runs summarizeIssues if it exists.
+    Returns True if issues were found, False otherwise.
     """
     logging.info("--- Starting verifySuccess Process ---")
     dobdir_path = os.path.join(drive_path, "dobDir")
     issues_txt = os.path.join(dobdir_path, "ISSUES.txt")
     
+    issues_found = False
     if os.path.exists(issues_txt):
         logging.warning("ISSUES.txt found! Running summarizeIssues.")
+        issues_found = True
         summarizeIssues(drive_path)
     else:
         logging.info("No ISSUES.txt found. All copies were successful!")
         
     logging.info("--- Finished verifySuccess Process ---")
+    return issues_found
 
 def process_drive(drive_path):
     """Process a newly connected drive."""
@@ -555,12 +622,11 @@ def process_drive(drive_path):
     # Check if packfiles.txt exists on the root of the drive
     if not os.path.exists(packfiles_path):
         logging.info(f"packfiles.txt NOT FOUND on {drive_path}. Skipping this drive.")
-        return
+        return None
 
     logging.info(f"Found packfiles.txt on {drive_path}. Proceeding with processing.")
+    status_mgr.update(status_number=1)
     
-    # Create the dobDir folder on the root of the drive
-    logging.debug(f"Checking if dobDir exists at: {dobdir_path}")
     if os.path.exists(dobdir_path):
         logging.info(f"Directory {dobdir_path} already exists. Deleting it first...")
         try:
@@ -568,7 +634,7 @@ def process_drive(drive_path):
             logging.info(f"SUCCESS: Deleted existing directory {dobdir_path}")
         except Exception as e:
             logging.error(f"FAILED to delete existing directory {dobdir_path}. Exception details: {e}")
-            return
+            return True
             
     logging.info(f"Attempting to create dobDir on {drive_path}...")
     try:
@@ -576,7 +642,7 @@ def process_drive(drive_path):
         logging.info(f"SUCCESS: Created directory {dobdir_path}")
     except Exception as e:
         logging.error(f"FAILED to create directory {dobdir_path}. Exception details: {e}")
-        return
+        return True
 
     # ========================================================================
     # CLEAR COMMENT MARKER FOR FURTHER PROCESSING
@@ -604,7 +670,7 @@ def process_drive(drive_path):
     mainCopy(drive_path)
     
     # Verify success and handle issues
-    verifySuccess(drive_path)
+    issues_found = verifySuccess(drive_path)
     
     logging.info(f"Cleaning up {dobdir_path}...")
     try:
@@ -614,13 +680,17 @@ def process_drive(drive_path):
         logging.error(f"FAILED to delete directory {dobdir_path}. Exception details: {e}")
     
     logging.info(f"========== Finished initial processing for {drive_path} ==========")
+    return issues_found
 
 
 def main():
+    status_mgr.update(status_number=0, running=1)
     logging.info("Starting dobd.py drive monitor program...")
     
+    # Track processed drives to determine status when waiting
+    processed_drives = {}
+    
     # Instantly add all currently connected drives to the known list
-    # This ephemeral list starts fresh every time the program runs
     logging.debug("Fetching initial list of connected drives...")
     known_drives = get_connected_drives()
     logging.info(f"Initial drives detected and added to ignore list: {', '.join(known_drives) if known_drives else 'None'}")
@@ -640,7 +710,9 @@ def main():
                 known_drives.add(drive)
                 
                 # Transition to processing function
-                process_drive(drive)
+                had_issues = process_drive(drive)
+                if had_issues is not None:
+                    processed_drives[drive] = had_issues
                 
                 logging.info("Returning to main monitoring loop.")
                 
@@ -650,6 +722,17 @@ def main():
                 logging.warning(f"--- DRIVE REMOVED: {drive} ---")
                 logging.debug(f"Removing {drive} from the internal ignore list so it can be re-processed if inserted again.")
                 known_drives.remove(drive)
+                if drive in processed_drives:
+                    del processed_drives[drive]
+                    
+            # Determine correct waiting status
+            if processed_drives:
+                if any(processed_drives.values()):
+                    status_mgr.update(status_number=11)
+                else:
+                    status_mgr.update(status_number=10)
+            else:
+                status_mgr.update(status_number=0)
                 
             # Sleep briefly before checking again to prevent high CPU usage
             time.sleep(2)
@@ -658,6 +741,8 @@ def main():
         logging.info("Program stopped by user via KeyboardInterrupt.")
     except Exception as e:
         logging.critical(f"An unexpected error occurred in the main loop: {e}", exc_info=True)
+    finally:
+        status_mgr.update(running=0)
 
 if __name__ == "__main__":
     main()
