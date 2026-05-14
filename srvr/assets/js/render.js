@@ -2,28 +2,28 @@
 // Pure function of state -> DOM. Sets data attributes the test harness asserts on.
 
 export const STATUS_LABELS = {
-  0:  'Scanning for drives',
-  1:  'Preparing drive',
-  2:  'Identifying region',
-  3:  'Copying region files',
-  4:  'Matching files',
-  5:  'Copying files',
-  6:  'Issues detected',
-  10: 'Drive completed successfully',
-  11: 'Drive completed — errors detected',
+  0: 'Scanning for Drives',
+  1: 'Preparing Drive',
+  2: 'Identifying Region',
+  3: 'Copying Base Files',
+  4: 'Matching Specific Files',
+  5: 'Copying Specific Files',
+  6: 'Issues Detected',
+  10: 'Drive Completed Successfully',
+  11: 'Drive Completed — Errors Detected',
 };
 
 const ICONS = {
   power: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v10"/><path d="M5.6 6.4a8 8 0 1 0 12.8 0"/></svg>`,
   check: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>`,
-  warn:  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>`,
+  warn: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>`,
   alert: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>`,
   spinner: '<span class="spinner" aria-hidden="true"></span>',
 };
 
 function esc(s) {
   return String(s).replace(/[&<>"']/g, c =>
-    ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 export function powerButtonHtml() {
@@ -43,7 +43,7 @@ export function brandHtml() {
 
 function progressBlock(label, completed, total) {
   const safeTotal = (typeof total === 'number' && total > 0) ? total : 0;
-  const safeDone  = (typeof completed === 'number' && completed >= 0) ? completed : 0;
+  const safeDone = (typeof completed === 'number' && completed >= 0) ? completed : 0;
   const pct = safeTotal > 0 ? Math.min(100, Math.round((safeDone / safeTotal) * 1000) / 10) : 0;
   const meta = safeTotal > 0
     ? `${safeDone.toLocaleString()} of ${safeTotal.toLocaleString()} files`
@@ -84,34 +84,45 @@ function screenForState(state) {
       return { cardClass: '', inner: radarHeadline(STATUS_LABELS[0]) };
 
     case 1:
-      return { cardClass: '',
+      return {
+        cardClass: '',
         inner: spinnerHeadline(STATUS_LABELS[1]) +
-          `<p class="subline">Getting things ready on the drive.</p>` };
+          `<p class="subline">Getting things ready on the drive.</p>`
+      };
 
     case 2:
-      return { cardClass: '',
+      return {
+        cardClass: '',
         inner: spinnerHeadline(STATUS_LABELS[2]) +
-          `<p class="subline">Figuring out which set of files this drive needs.</p>` };
+          `<p class="subline">Figuring out which set of files this drive needs.</p>`
+      };
 
     case 3:
-      return { cardClass: '',
+      return {
+        cardClass: '',
         inner: spinnerHeadline(STATUS_LABELS[3]) +
           progressBlock('base', state.CompletedBaseFiles, state.TotalBaseFiles) +
-          `<p class="subline">Copying the baseline set for this region.</p>` };
+          `<p class="subline">Copying the baseline set for this region.</p>`
+      };
 
     case 4:
-      return { cardClass: '',
+      return {
+        cardClass: '',
         inner: spinnerHeadline(STATUS_LABELS[4]) +
-          `<p class="subline">Working out where every file should go.</p>` };
+          `<p class="subline">Working out where every file should go.</p>`
+      };
 
     case 5:
-      return { cardClass: '',
+      return {
+        cardClass: '',
         inner: spinnerHeadline(STATUS_LABELS[5]) +
           progressBlock('main', state.CompletedMainFiles, state.TotalMainFiles) +
-          `<p class="subline">Copying the rest of the files into place.</p>` };
+          `<p class="subline">Copying the rest of the files into place.</p>`
+      };
 
     case 6:
-      return { cardClass: 'is-danger',
+      return {
+        cardClass: 'is-danger',
         inner: `
           <div class="status-icon is-danger">${ICONS.alert}</div>
           <div class="eyebrow"><span class="eyebrow-dot"></span> Heads up</div>
@@ -120,7 +131,8 @@ function screenForState(state) {
             Hold on while the details get written down.</p>` };
 
     case 10:
-      return { cardClass: 'is-success',
+      return {
+        cardClass: 'is-success',
         inner: `
           <div class="status-icon is-success">${ICONS.check}</div>
           <div class="eyebrow"><span class="eyebrow-dot"></span> All done</div>
@@ -128,7 +140,8 @@ function screenForState(state) {
           <p class="subline">Safe to unplug. Pop in the next one whenever you're ready.</p>` };
 
     case 11:
-      return { cardClass: 'is-warning',
+      return {
+        cardClass: 'is-warning',
         inner: `
           <div class="status-icon is-warning">${ICONS.warn}</div>
           <div class="eyebrow"><span class="eyebrow-dot"></span> Finished with notes</div>
@@ -136,9 +149,11 @@ function screenForState(state) {
           <p class="subline">Check <strong>ISSUES.md</strong> at the root of the drive for details on what came up.</p>` };
 
     default:
-      return { cardClass: '',
+      return {
+        cardClass: '',
         inner: spinnerHeadline('Working') +
-          `<p class="subline">Hang tight…</p>` };
+          `<p class="subline">Hang tight…</p>`
+      };
   }
 }
 
@@ -171,7 +186,7 @@ function renderOn(stage, state) {
 // Top-level render. Returns true if it changed the DOM.
 export function render(state, prev) {
   document.body.dataset.running = String(state.Running);
-  document.body.dataset.status  = String(state.StatusNumber);
+  document.body.dataset.status = String(state.StatusNumber);
 
   const stage = document.getElementById('stage');
   if (!stage) return false;
@@ -213,19 +228,19 @@ export function render(state, prev) {
 
 function updateProgressInPlace(stage, state) {
   const isBase = state.StatusNumber === 3;
-  const total     = isBase ? state.TotalBaseFiles     : state.TotalMainFiles;
+  const total = isBase ? state.TotalBaseFiles : state.TotalMainFiles;
   const completed = isBase ? state.CompletedBaseFiles : state.CompletedMainFiles;
   const safeTotal = (typeof total === 'number' && total > 0) ? total : 0;
-  const safeDone  = (typeof completed === 'number' && completed >= 0) ? completed : 0;
+  const safeDone = (typeof completed === 'number' && completed >= 0) ? completed : 0;
   const pct = safeTotal > 0 ? Math.min(100, Math.round((safeDone / safeTotal) * 1000) / 10) : 0;
   const meta = safeTotal > 0
     ? `${safeDone.toLocaleString()} of ${safeTotal.toLocaleString()} files`
     : 'preparing…';
 
-  const bar  = stage.querySelector('[data-progress-bar]');
-  const m    = stage.querySelector('[data-progress-meta]');
-  const p    = stage.querySelector('[data-progress-pct]');
+  const bar = stage.querySelector('[data-progress-bar]');
+  const m = stage.querySelector('[data-progress-meta]');
+  const p = stage.querySelector('[data-progress-pct]');
   if (bar) bar.style.width = `${pct}%`;
-  if (m)   m.textContent   = meta;
-  if (p)   p.textContent   = `${pct}%`;
+  if (m) m.textContent = meta;
+  if (p) p.textContent = `${pct}%`;
 }
