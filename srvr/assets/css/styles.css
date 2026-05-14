@@ -82,7 +82,7 @@ html, body {
   border-radius: 50%;
   background: var(--fg);
   display: inline-block;
-  animation: dotPulse 2.4s ease-in-out infinite;
+  animation: dotPulse 3.6s ease-in-out infinite;
 }
 
 @keyframes dotPulse {
@@ -150,15 +150,22 @@ html, body {
   animation: fadeUp .6s var(--ease) both;
 }
 
-.off-screen .off-sub {
-  display: block;
-  font-size: .9rem;
+.off-foot {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 2rem;
+  text-align: center;
+  font-size: .75rem;
   font-weight: 400;
-  margin-top: 1.5rem;
-  color: var(--muted);
-  letter-spacing: .04em;
+  letter-spacing: .22em;
   text-transform: uppercase;
-  animation: dotPulse 2.4s ease-in-out infinite;
+  color: var(--muted);
+  pointer-events: none;
+  animation: fadeUp .8s var(--ease) both;
+  animation-delay: .2s;
+  opacity: 0;
+  animation-fill-mode: forwards;
 }
 
 /* ---------- ON state — status card ---------- */
@@ -197,7 +204,7 @@ html, body {
   height: 6px;
   border-radius: 50%;
   background: var(--fg);
-  animation: dotPulse 1.8s ease-in-out infinite;
+  animation: dotPulse 3s ease-in-out infinite;
 }
 
 .headline {
@@ -231,7 +238,7 @@ html, body {
   border-top-color: var(--fg);
   border-radius: 50%;
   display: inline-block;
-  animation: spin .9s linear infinite;
+  animation: spin 1.6s cubic-bezier(.55,.15,.45,.85) infinite;
   vertical-align: middle;
   flex-shrink: 0;
 }
@@ -255,10 +262,10 @@ html, body {
   border-radius: 50%;
   border: 2px solid var(--fg);
   opacity: 0;
-  animation: radarPulse 2.4s ease-out infinite;
+  animation: radarPulse 3.6s ease-out infinite;
 }
 
-.radar::after { animation-delay: 1.2s; }
+.radar::after { animation-delay: 1.8s; }
 
 .radar .radar-core {
   position: absolute;
@@ -267,7 +274,7 @@ html, body {
   background: var(--fg);
   border-radius: 50%;
   transform: translate(-50%, -50%);
-  animation: dotPulse 1.6s ease-in-out infinite;
+  animation: dotPulse 2.6s ease-in-out infinite;
 }
 
 @keyframes radarPulse {
@@ -313,7 +320,7 @@ html, body {
     transparent
   );
   background-size: 22px 22px;
-  animation: stripe 1s linear infinite;
+  animation: stripe 1.8s linear infinite;
 }
 
 @keyframes stripe {
@@ -347,11 +354,11 @@ html, body {
 
 .card.is-danger {
   border-color: color-mix(in srgb, var(--danger) 50%, var(--card-border));
-  animation: cardEnter .55s var(--ease) both, dangerGlow 2.6s ease-in-out infinite;
+  animation: cardEnter .55s var(--ease) both, dangerGlow 4s ease-in-out infinite;
 }
 .card.is-danger .headline {
   color: var(--danger);
-  animation: shake 4s ease-in-out infinite;
+  animation: shake 6s ease-in-out infinite;
 }
 .card.is-danger .eyebrow .eyebrow-dot { background: var(--danger); }
 
@@ -361,27 +368,46 @@ html, body {
 }
 
 @keyframes shake {
-  0%, 88%, 100% { transform: translate(0,0); }
-  90% { transform: translate(-1px, 0); }
-  92% { transform: translate(2px, 0); }
-  94% { transform: translate(-2px, 0); }
-  96% { transform: translate(1px, 0); }
+  0%, 92%, 100% { transform: translate(0,0); }
+  94% { transform: translate(-1px, 0); }
+  96% { transform: translate(2px, 0); }
+  98% { transform: translate(-1px, 0); }
 }
 
-.dots::after {
-  content: "";
+/* ---------- Animated three-dots (.dots) ----------
+   Rendered as three real <span> children inside .dots so the
+   container width never changes — preventing the title text
+   from shifting as dots fade in/out.
+   ---------------------------------------------------- */
+.dots {
   display: inline-block;
-  width: 1.2em;
+  width: 1.8em;
   text-align: left;
-  animation: dots 1.4s steps(4, end) infinite;
+  vertical-align: baseline;
+}
+.dots > span {
+  opacity: 0;
+  animation: dotFade 2.6s ease-in-out infinite;
+}
+.dots > span:nth-child(1) { animation-delay: 0s;    }
+.dots > span:nth-child(2) { animation-delay: 0.4s;  }
+.dots > span:nth-child(3) { animation-delay: 0.8s;  }
+
+@keyframes dotFade {
+  0%        { opacity: 0; }
+  20%       { opacity: 1; }
+  65%       { opacity: 1; }
+  85%, 100% { opacity: 0; }
 }
 
-@keyframes dots {
-  0%   { content: "";    }
-  25%  { content: ".";   }
-  50%  { content: "..";  }
-  75%  { content: "..."; }
-  100% { content: "";    }
+.subline .hint {
+  display: inline-block;
+  margin-top: .35rem;
+  font-style: normal;
+  font-size: .8rem;
+  letter-spacing: .04em;
+  color: var(--muted);
+  opacity: .85;
 }
 
 /* ---------- Status icons (success / warning) ---------- */
@@ -410,7 +436,7 @@ html, body {
 .status-icon.is-danger {
   background: color-mix(in srgb, var(--danger) 14%, transparent);
   color: var(--danger);
-  animation: iconPop .55s var(--ease) both, breathe 2s ease-in-out infinite;
+  animation: iconPop .55s var(--ease) both, breathe 3.4s ease-in-out infinite;
 }
 
 @keyframes iconPop {

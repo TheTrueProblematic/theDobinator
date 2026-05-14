@@ -1,7 +1,13 @@
 // Test harness: drives the preview iframe with mock states and runs assertions.
 
-import { ASSERTIONS } from '../../tests/assertions.js';
 import { STATUS_LABELS } from './render.js';
+
+// Dynamic import so each "Run all assertions" pulls a fresh copy and we
+// never stare at a cached old version while iterating on the test suite.
+async function loadAssertions() {
+  const mod = await import(`../../tests/assertions.js?t=${Date.now()}`);
+  return mod.ASSERTIONS;
+}
 
 const STATE_BUTTONS = [
   { sn: 0,  label: '0 · Scanning' },
@@ -141,8 +147,9 @@ async function runAll() {
 
   let passed = 0, failed = 0;
   const lines = [];
+  const assertions = await loadAssertions();
 
-  for (const a of ASSERTIONS) {
+  for (const a of assertions) {
     if (a.setupBefore) {
       applyStateToPreview(a.setupBefore);
       await waitFrame();
