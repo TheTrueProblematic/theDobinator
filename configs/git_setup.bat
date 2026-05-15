@@ -1,14 +1,22 @@
 @echo off
 title The Dobinator - Git Updater Setup
 
-set "LOG_DIR=%~dp0git_updater\logs"
+set "LOG_DIR=%~dp0logs"
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 set "LOG_FILE=%LOG_DIR%\setup.log"
 
 echo %date% %time% - Starting Git Updater Setup >> "%LOG_FILE%"
 echo [*] Setting up the Git Updater Background Process...
-echo %date% %time% - Defining VBS_PATH >> "%LOG_FILE%"
+echo %date% %time% - Refreshing PATH >> "%LOG_FILE%"
 
+:: Refresh PATH to ensure Git is available
+for /f "tokens=2*" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v Path') do set "syspath=%%B"
+for /f "tokens=2*" %%A in ('reg query "HKCU\Environment" /v Path 2^>nul') do set "userpath=%%B"
+set "PATH=%syspath%;%userpath%"
+git --version >> "%LOG_FILE%" 2>&1
+
+echo.
+echo %date% %time% - Defining VBS_PATH >> "%LOG_FILE%"
 :: Define paths
 set "VBS_PATH=%~dp0dobGit.vbs"
 echo %date% %time% - VBS_PATH is %VBS_PATH% >> "%LOG_FILE%"

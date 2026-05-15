@@ -12,7 +12,7 @@ STATUS_FILE = os.path.join(PROJECT_ROOT, "srvr", "status.json")
 LOG_FILE = os.path.join(PROJECT_ROOT, "logs", "gitLog.log")
 
 # Setup super verbose logging
-VERBOSE_LOG_DIR = os.path.join(SCRIPT_DIR, "logs")
+VERBOSE_LOG_DIR = os.path.join(CONFIGS_DIR, "logs")
 os.makedirs(VERBOSE_LOG_DIR, exist_ok=True)
 VERBOSE_LOG_FILE = os.path.join(VERBOSE_LOG_DIR, "update.log")
 

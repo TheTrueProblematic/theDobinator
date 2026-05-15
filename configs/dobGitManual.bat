@@ -1,7 +1,7 @@
 @echo off
 title The Dobinator - Manual Git Update
 
-set "LOG_DIR=%~dp0git_updater\logs"
+set "LOG_DIR=%~dp0logs"
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 set "LOG_FILE=%LOG_DIR%\manual.log"
 

@@ -6,7 +6,7 @@ Set shell = CreateObject("WScript.Shell")
 
 scriptDir = fso.GetParentFolderName(WScript.ScriptFullName)
 pythonScript = fso.BuildPath(scriptDir, "git_updater\git_update.py")
-logDir = fso.BuildPath(scriptDir, "git_updater\logs")
+logDir = fso.BuildPath(scriptDir, "logs")
 
 If Not fso.FolderExists(logDir) Then
     fso.CreateFolder(logDir)
