@@ -100,9 +100,15 @@ html, body {
   position: relative;
 }
 
-/* ---------- Power button ---------- */
+/* ---------- Power button & Topbar Actions ---------- */
 
-.power-btn {
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.power-btn, .history-btn {
   width: 48px;
   height: 48px;
   border-radius: 50%;
@@ -121,16 +127,16 @@ html, body {
   position: relative;
 }
 
-.power-btn:hover {
+.power-btn:hover, .history-btn:hover {
   transform: translateY(-2px) scale(1.05);
   background: var(--fg);
   color: var(--bg);
   box-shadow: 0 6px 18px rgba(0,0,0,.18);
 }
 
-.power-btn:active { transform: translateY(0) scale(.97); }
+.power-btn:active, .history-btn:active { transform: translateY(0) scale(.97); }
 
-.power-btn svg {
+.power-btn svg, .history-btn svg {
   width: 20px;
   height: 20px;
   display: block;
@@ -228,6 +234,151 @@ html, body {
   font-size: .95rem;
   letter-spacing: .02em;
   line-height: 1.5;
+}
+
+/* ---------- History Modal ---------- */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  opacity: 1;
+  visibility: visible;
+  transition: opacity .3s var(--ease), visibility .3s var(--ease);
+}
+
+.modal.hidden {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+}
+
+.modal-content {
+  position: relative;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--card-shadow);
+  width: 100%;
+  max-width: 500px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  transform: translateY(0) scale(1);
+  transition: transform .3s var(--ease);
+}
+
+.modal.hidden .modal-content {
+  transform: translateY(16px) scale(0.98);
+}
+
+.modal-header {
+  padding: 1.5rem 2rem;
+  border-bottom: 1px solid var(--card-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.modal-title {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin: 0;
+  color: var(--fg);
+}
+
+.modal-close {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0.25rem;
+  border-radius: 4px;
+  display: flex;
+  transition: color .2s var(--ease), background .2s var(--ease);
+}
+
+.modal-close:hover {
+  color: var(--fg);
+  background: rgba(128, 128, 128, 0.1);
+}
+
+.modal-close svg {
+  width: 20px;
+  height: 20px;
+}
+
+.modal-body {
+  padding: 1.5rem 2rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.history-item {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--card-border);
+  background: rgba(128, 128, 128, 0.03);
+}
+
+.history-item-icon {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.history-item-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.history-item-text {
+  font-weight: 500;
+  font-size: 0.95rem;
+  word-break: break-all;
+}
+
+.history-item.is-success {
+  border-color: color-mix(in srgb, var(--success) 35%, var(--card-border));
+}
+
+.history-item.is-success .history-item-icon {
+  color: var(--success);
+}
+
+.history-item.is-success .history-item-text {
+  color: var(--success);
+}
+
+.history-item.is-warning {
+  border-color: color-mix(in srgb, var(--warning) 40%, var(--card-border));
+}
+
+.history-item.is-warning .history-item-icon {
+  color: var(--warning);
+}
+
+.history-item.is-warning .history-item-text {
+  color: var(--warning);
 }
 
 /* ---------- Spinner ---------- */

@@ -204,9 +204,15 @@ export function render(state, prev) {
     prev.TotalBaseFiles !== state.TotalBaseFiles ||
     prev.CompletedBaseFiles !== state.CompletedBaseFiles ||
     prev.TotalMainFiles !== state.TotalMainFiles ||
-    prev.CompletedMainFiles !== state.CompletedMainFiles;
+    prev.CompletedMainFiles !== state.CompletedMainFiles ||
+    JSON.stringify(prev.CompletedDrives) !== JSON.stringify(state.CompletedDrives);
 
   if (!changed) return false;
+
+  // Render history list if it changed
+  if (!prev || JSON.stringify(prev.CompletedDrives) !== JSON.stringify(state.CompletedDrives)) {
+    renderHistory(state.CompletedDrives);
+  }
 
   // Connection error wins over everything.
   if (state._error) {
@@ -249,4 +255,31 @@ function updateProgressInPlace(stage, state) {
   if (bar) bar.style.width = `${pct}%`;
   if (m) m.textContent = meta;
   if (p) p.textContent = `${pct}%`;
+}
+
+function renderHistory(completedDrives = []) {
+  const list = document.getElementById('historyList');
+  if (!list) return;
+  
+  if (completedDrives.length === 0) {
+    list.innerHTML = `<div class="subline" style="text-align: center; margin-top: 0;">No drives processed yet.</div>`;
+    return;
+  }
+  
+  // Reverse the array to show most recent at the top
+  const drives = [...completedDrives].reverse();
+  
+  list.innerHTML = drives.map(drive => {
+    const isWarning = drive.issues;
+    const itemClass = isWarning ? 'is-warning' : 'is-success';
+    const icon = isWarning ? ICONS.warn : ICONS.check;
+    const text = isWarning ? `${esc(drive.name)} Experienced Issues` : `${esc(drive.name)} Completed`;
+    
+    return `
+      <div class="history-item ${itemClass}">
+        <div class="history-item-icon">${icon}</div>
+        <div class="history-item-text">${text}</div>
+      </div>
+    `;
+  }).join('');
 }

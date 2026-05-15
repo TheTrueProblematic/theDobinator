@@ -61,12 +61,24 @@ async function handlePowerClick() {
 }
 
 function wireDelegatedEvents() {
-  // Use event delegation since the button is re-rendered on state changes
-  // would also be re-bound — but actually the button lives in the topbar,
-  // not the stage, so it's stable. Still, delegated is safer.
   document.addEventListener('click', (e) => {
     const btn = e.target.closest('#powerBtn');
     if (btn) handlePowerClick();
+
+    const historyBtn = e.target.closest('#historyBtn');
+    if (historyBtn) {
+      document.getElementById('historyModal')?.classList.remove('hidden');
+    }
+
+    const closeBtn = e.target.closest('#closeHistoryBtn');
+    if (closeBtn) {
+      document.getElementById('historyModal')?.classList.add('hidden');
+    }
+    
+    const backdrop = e.target.closest('#modalBackdrop');
+    if (backdrop) {
+      document.getElementById('historyModal')?.classList.add('hidden');
+    }
   });
 }
 

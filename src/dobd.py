@@ -7,6 +7,8 @@ import csv
 import shutil
 import subprocess
 import json
+import threading
+import queue
 
 # --- Logging Setup ---
 # Find the project root by going up one level from the 'src' directory
@@ -108,6 +110,7 @@ class StatusManager:
             "CompletedBaseFiles": -1,
             "TotalMainFiles": -1,
             "CompletedMainFiles": -1,
+            "CompletedDrives": [],
             "Running": 1
         }
         if os.path.exists(self.filepath):
@@ -125,7 +128,7 @@ class StatusManager:
         except Exception as e:
             logging.error(f"Failed to write status to {self.filepath}: {e}")
 
-    def update(self, status_number=None, total_base=None, comp_base=None, total_main=None, comp_main=None, running=None):
+    def update(self, status_number=None, total_base=None, comp_base=None, total_main=None, comp_main=None, running=None, completed_drives=None):
         data = self._read_data()
         
         if status_number is not None:
@@ -140,8 +143,16 @@ class StatusManager:
         if comp_base is not None: data["CompletedBaseFiles"] = comp_base
         if total_main is not None: data["TotalMainFiles"] = total_main
         if comp_main is not None: data["CompletedMainFiles"] = comp_main
+        if completed_drives is not None: data["CompletedDrives"] = completed_drives
         if running is not None: data["Running"] = running
         
+        self._write_data(data)
+
+    def add_completed_drive(self, name, had_issues):
+        data = self._read_data()
+        drives = data.get("CompletedDrives", [])
+        drives.append({"name": name, "issues": had_issues})
+        data["CompletedDrives"] = drives
         self._write_data(data)
 
 status_mgr = StatusManager(STATUS_FILE)
@@ -298,6 +309,43 @@ def get_connected_drives():
             drives.add(f"{letter}:\\")
         bitmask >>= 1
     return drives
+
+def get_volume_name(drive_path):
+    """Returns the volume name of the given drive path using ctypes."""
+    try:
+        volume_name_buffer = ctypes.create_unicode_buffer(1024)
+        result = ctypes.windll.kernel32.GetVolumeInformationW(
+            ctypes.c_wchar_p(drive_path),
+            volume_name_buffer,
+            ctypes.sizeof(volume_name_buffer),
+            None, None, None, None, 0
+        )
+        if result != 0:
+            vol_name = volume_name_buffer.value
+            if vol_name:
+                return vol_name
+    except Exception as e:
+        logging.error(f"Error getting volume name for {drive_path}: {e}")
+    
+    # Fallback to drive letter (e.g. "Drive D")
+    return f"Drive {drive_path[0]}"
+
+def eject_drive(drive_path):
+    """Force ejects the drive using PowerShell."""
+    try:
+        drive_letter = drive_path[:2] # e.g. "D:"
+        cmd = [
+            "powershell",
+            "-NoProfile",
+            "-WindowStyle", "Hidden",
+            "-Command",
+            f"$driveEject = New-Object -comObject Shell.Application; $driveEject.Namespace(17).ParseName('{drive_letter}').InvokeVerb('Eject')"
+        ]
+        # creationflags=0x08000000 prevents a window from popping up
+        subprocess.run(cmd, creationflags=0x08000000, check=False)
+        logging.info(f"Successfully requested Windows to eject {drive_letter}")
+    except Exception as e:
+        logging.error(f"Failed to eject {drive_path}: {e}")
 
 def classifyRegion(llm_instance, drive_path, work_vars):
     """
@@ -717,12 +765,51 @@ def process_drive(drive_path):
     return issues_found
 
 
+def worker_thread(drive_queue, status_mgr):
+    logging.info("Worker thread started. Waiting for drives...")
+    while True:
+        try:
+            drive_path = drive_queue.get()
+            if drive_path is None:  # Shutdown signal
+                break
+                
+            vol_name = get_volume_name(drive_path)
+            logging.info(f"Worker picked up drive: {drive_path} (Name: {vol_name})")
+            
+            # process_drive updates status numbers during its execution (1, 2, 3, etc.)
+            had_issues = process_drive(drive_path)
+            
+            if had_issues is not None:
+                # Add to completed drives
+                status_mgr.add_completed_drive(vol_name, had_issues)
+                
+                # Set final status for this drive
+                if had_issues:
+                    status_mgr.update(status_number=11)
+                else:
+                    status_mgr.update(status_number=10)
+                
+                # Eject the drive
+                logging.info(f"Ejecting drive {drive_path}...")
+                eject_drive(drive_path)
+            else:
+                # If packfiles.txt wasn't found, it resets status if the queue is empty
+                current_state = status_mgr._read_data()
+                if drive_queue.empty() and current_state.get("StatusNumber", 0) not in [10, 11]:
+                    status_mgr.update(status_number=0)
+
+            drive_queue.task_done()
+        except Exception as e:
+            logging.error(f"Error in worker thread: {e}", exc_info=True)
+
+
 def main():
-    status_mgr.update(status_number=0, running=1)
+    status_mgr.update(status_number=0, running=1, completed_drives=[])
     logging.info("Starting dobd.py drive monitor program...")
     
-    # Track processed drives to determine status when waiting
-    processed_drives = {}
+    drive_queue = queue.Queue()
+    worker = threading.Thread(target=worker_thread, args=(drive_queue, status_mgr), daemon=True)
+    worker.start()
     
     # Instantly add all currently connected drives to the known list
     logging.debug("Fetching initial list of connected drives...")
@@ -740,15 +827,9 @@ def main():
             new_drives = current_drives - known_drives
             for drive in new_drives:
                 logging.warning(f"--- NEW DRIVE DETECTED: {drive} ---")
-                logging.debug(f"Adding {drive} to the internal ignore list.")
+                logging.debug(f"Adding {drive} to the internal ignore list and queue.")
                 known_drives.add(drive)
-                
-                # Transition to processing function
-                had_issues = process_drive(drive)
-                if had_issues is not None:
-                    processed_drives[drive] = had_issues
-                
-                logging.info("Returning to main monitoring loop.")
+                drive_queue.put(drive)
                 
             # Find drives that were removed (in known but not in current)
             removed_drives = known_drives - current_drives
@@ -756,17 +837,12 @@ def main():
                 logging.warning(f"--- DRIVE REMOVED: {drive} ---")
                 logging.debug(f"Removing {drive} from the internal ignore list so it can be re-processed if inserted again.")
                 known_drives.remove(drive)
-                if drive in processed_drives:
-                    del processed_drives[drive]
                     
-            # Determine correct waiting status
-            if processed_drives:
-                if any(processed_drives.values()):
-                    status_mgr.update(status_number=11)
-                else:
-                    status_mgr.update(status_number=10)
-            else:
-                status_mgr.update(status_number=0)
+            # Reset status to 0 if no known drives are connected and queue is empty
+            if not known_drives and drive_queue.empty():
+                current_state = status_mgr._read_data()
+                if current_state.get("StatusNumber", 0) != 0:
+                    status_mgr.update(status_number=0)
                 
             # Sleep briefly before checking again to prevent high CPU usage
             time.sleep(2)

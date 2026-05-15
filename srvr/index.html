@@ -26,16 +26,39 @@
         <span class="brand-dot" aria-hidden="true"></span>
         The Dobinator
       </span>
-      <button id="powerBtn" class="power-btn" aria-label="Toggle The Dobinator" title="Toggle The Dobinator">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M12 2v10"/>
-          <path d="M5.6 6.4a8 8 0 1 0 12.8 0"/>
-        </svg>
-      </button>
+      <div class="topbar-actions">
+        <button id="historyBtn" class="history-btn" aria-label="View Completed Drives" title="View Completed Drives">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M20 6L9 17l-5-5"/>
+          </svg>
+        </button>
+        <button id="powerBtn" class="power-btn" aria-label="Toggle The Dobinator" title="Toggle The Dobinator">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 2v10"/>
+            <path d="M5.6 6.4a8 8 0 1 0 12.8 0"/>
+          </svg>
+        </button>
+      </div>
     </header>
 
     <main id="stage" class="stage" aria-live="polite"></main>
+
+    <!-- History Modal -->
+    <div id="historyModal" class="modal hidden" aria-hidden="true">
+      <div class="modal-backdrop" id="modalBackdrop"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2 class="modal-title">Completed Drives</h2>
+          <button id="closeHistoryBtn" class="modal-close" aria-label="Close modal">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div id="historyList" class="modal-body">
+          <!-- Populated by JS -->
+        </div>
+      </div>
+    </div>
   </div>
 
   <script type="module" src="assets/js/app.js"></script>
