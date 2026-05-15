@@ -107,7 +107,8 @@ def do_update():
     # 2. Get latest copy of main branch and merge into local version
     logging.info("Running git pull origin main...")
     try:
-        result = subprocess.run(["git", "pull", "origin", "main"], cwd=PROJECT_ROOT, creationflags=0x08000000, capture_output=True, text=True)
+        # Using shell=True and a string command helps locate git in PATH on Windows
+        result = subprocess.run("git pull origin main", shell=True, cwd=PROJECT_ROOT, creationflags=0x08000000, capture_output=True, text=True)
         logging.debug(f"git pull output: {result.stdout}")
         logging.debug(f"git pull stderr: {result.stderr}")
         if result.returncode == 0:
@@ -121,16 +122,16 @@ def do_update():
         log_event(f"Failed to clone the latest version: {e}")
 
     # 3. Start the program running again
-    if was_running:
-        logging.info("System was running before update. Initiating startup via dobWin.bat...")
-        dobwin_path = os.path.join(PROJECT_ROOT, "dobWin.bat")
-        # Again, pass \r\n to bypass any pause
-        logging.debug(f"Running subprocess: {dobwin_path}")
-        result = subprocess.run(["cmd.exe", "/c", dobwin_path], cwd=PROJECT_ROOT, creationflags=0x08000000, input=b"\r\n", capture_output=True)
+    logging.info("Initiating startup via dobWin.bat unconditionally...")
+    dobwin_path = os.path.join(PROJECT_ROOT, "dobWin.bat")
+    logging.debug(f"Running subprocess: {dobwin_path}")
+    try:
+        # dobWin.bat toggles the program. Since we ensured it's off (or it was already off), this will turn it on.
+        result = subprocess.run(f'cmd.exe /c "{dobwin_path}"', shell=True, cwd=PROJECT_ROOT, creationflags=0x08000000, input=b"\r\n", capture_output=True)
         logging.debug(f"dobWin.bat output: {result.stdout}")
         logging.debug(f"dobWin.bat stderr: {result.stderr}")
-    else:
-        logging.info("System was not running before update. Leaving it off.")
+    except Exception as e:
+        logging.error(f"Failed to start dobWin.bat: {e}")
         
     logging.info("do_update process completed.")
         
