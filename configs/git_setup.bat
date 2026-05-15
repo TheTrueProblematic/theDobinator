@@ -72,13 +72,36 @@ echo %date% %time% - Killing any existing wscript processes running dobGit.vbs >
 powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name = 'wscript.exe'\" | Where-Object { $_.CommandLine -match 'dobGit\.vbs' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }" >> "%LOG_FILE%" 2>&1
 
 :: --------------------------------------------------------------------
-:: 4. Create a scheduled task that re-launches the VBS watcher on every
-::    logon. The VBS itself is what waits until 5 AM each day; the task
-::    just makes sure the watcher survives reboots.
+:: 4. Create a scheduled task that re-launches the VBS watcher every
+::    time the machine boots. The watcher itself is what waits until
+::    5 AM each day; the task just guarantees it's running again after
+::    any reboot.
+::
+::    - /sc onstart fires at system startup, BEFORE any user logon, so
+::      this works on a headless unattended machine where nobody ever
+::      signs in.
+::    - /ru SYSTEM runs the task as the built-in SYSTEM account, which
+::      requires no stored credentials and is always available. The VBS
+::      runs in Session 0 (no GUI) but that is fine because it only
+::      does background work (sleep + shell.Run on the python updater).
+::    - /rl HIGHEST gives the task the elevated rights it needs to
+::      overwrite files under C:\theDobinator and to kill stale
+::      processes during the daily update.
+::
+::    Creating an onstart+SYSTEM task itself requires admin rights,
+::    which win_setup.bat already enforces before calling us.
 :: --------------------------------------------------------------------
-echo %date% %time% - Creating scheduled task >> "%LOG_FILE%"
-schtasks /create /tn "Dobinator Git Updater" /tr "wscript.exe \"%VBS_PATH%\"" /sc onlogon /delay 0001:00 /f >> "%LOG_FILE%" 2>&1
+echo %date% %time% - Removing any previous Dobinator Git Updater task >> "%LOG_FILE%"
+schtasks /delete /tn "Dobinator Git Updater" /f >> "%LOG_FILE%" 2>&1
+
+echo %date% %time% - Creating scheduled task (onstart, SYSTEM, highest) >> "%LOG_FILE%"
+schtasks /create /tn "Dobinator Git Updater" /tr "wscript.exe \"%VBS_PATH%\"" /sc onstart /delay 0001:00 /ru "SYSTEM" /rl HIGHEST /f >> "%LOG_FILE%" 2>&1
 echo %date% %time% - Task creation exit code: %errorLevel% >> "%LOG_FILE%"
+
+:: Diagnostic: dump the resulting task config so future log diving can
+:: confirm trigger=onstart and principal=SYSTEM with one grep.
+echo %date% %time% - Resulting task definition: >> "%LOG_FILE%"
+schtasks /query /tn "Dobinator Git Updater" /v /fo LIST >> "%LOG_FILE%" 2>&1
 
 :: --------------------------------------------------------------------
 :: 5. Start the VBS watcher right now so we don't have to wait for the
