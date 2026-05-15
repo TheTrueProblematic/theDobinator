@@ -55,10 +55,9 @@ To set up theDobinator from scratch on a brand new Windows 11 computer, follow t
 6. **Set up the Companion API (Power Toggle Service)**
    - Open **Task Scheduler**.
    - Create a new task (using "Create Task...") named "Dobinator Web API".
-   - Set it to **"Run only when user is logged on"** and check **"Run with highest privileges"**.
+   - Set it to **"Run only when user is logged on"** (do *not* check "Run with highest privileges").
    - Add a Trigger to begin the task **"At log on"** (with a 30-second delay) for any user.
    - Add an Action to "Start a program", pointing it to `srvr\start_api.bat` within your cloned repo.
-   - *Note: `setup.bat` configures the `EnableLinkedConnections` registry key so that elevated tasks can see your mapped network drives. A restart is required for this to apply.*
 
 7. **Configure Windows Firewall**
    - Open PowerShell as Administrator and run the following to allow inbound traffic:

@@ -75,9 +75,12 @@ powershell -Command "New-NetFirewallRule -DisplayName 'Dobinator Web API' -Direc
 echo.
 echo [*] Setting up the Companion API Task...
 set "BAT_PATH=%~dp0srvr\start_api.bat"
-:: Fix for elevated tasks not seeing mapped network drives (U: and G:)
-reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v EnableLinkedConnections /t REG_DWORD /d 1 /f >nul 2>&1
-schtasks /create /tn "Dobinator Web API" /tr "\"%BAT_PATH%\"" /sc onlogon /delay 0000:30 /rl highest /f >nul 2>&1
+:: Fix for network drives: Run as standard user on logon, not SYSTEM or elevated.
+:: First, kill any existing background API processes that might be holding port 5050
+taskkill /F /IM pythonw.exe >nul 2>&1
+taskkill /F /IM python.exe >nul 2>&1
+:: Then, create the task to run on logon for any user (without highest privileges)
+schtasks /create /tn "Dobinator Web API" /tr "\"%BAT_PATH%\"" /sc onlogon /delay 0000:30 /f >nul 2>&1
 
 echo.
 echo =======================================================
