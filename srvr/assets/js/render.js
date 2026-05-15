@@ -1,6 +1,8 @@
 // State-driven rendering for The Dobinator portal.
 // Pure function of state -> DOM. Sets data attributes the test harness asserts on.
 
+import { initScene, destroyScene } from './pixel-scene.js';
+
 export const STATUS_LABELS = {
   0: 'Scanning for Drives',
   1: 'Preparing Drive',
@@ -159,6 +161,7 @@ function screenForState(state) {
 }
 
 function renderOff(stage) {
+  destroyScene();
   stage.innerHTML = `
     <div class="off-screen fade-enter" data-screen="off">
       The Dobinator is not running
@@ -175,6 +178,7 @@ function renderError(stage, state) {
 }
 
 function renderOn(stage, state) {
+  initScene();
   const screen = screenForState(state);
   stage.innerHTML = `
     <div class="card ${screen.cardClass} fade-enter"
@@ -206,6 +210,7 @@ export function render(state, prev) {
 
   // Connection error wins over everything.
   if (state._error) {
+    destroyScene();
     renderError(stage, state);
     return true;
   }

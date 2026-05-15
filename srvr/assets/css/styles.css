@@ -96,6 +96,7 @@ html, body {
   align-items: center;
   justify-content: center;
   padding: 2rem;
+  padding-bottom: 200px; /* Space for pixel art scene at bottom */
   position: relative;
 }
 
@@ -586,11 +587,38 @@ html, body {
   background: #fff;
 }
 
+/* ---------- Pixel Art Scene ---------- */
+
+#pixel-scene-container {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 1;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+#pixel-scene-canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+/* Ensure the stage content sits above the scene */
+.stage {
+  position: relative;
+  z-index: 2;
+}
+
 /* ---------- Small screens ---------- */
 
 @media (max-width: 720px) {
   .topbar { padding: 1rem 1.25rem; }
   .card { padding: 2rem 1.5rem; border-radius: var(--radius-md); }
+  .stage { padding-bottom: 140px; } /* Smaller scene on mobile */
   .test-shell { grid-template-columns: 1fr; }
   .test-preview iframe { height: 60vh; }
 }

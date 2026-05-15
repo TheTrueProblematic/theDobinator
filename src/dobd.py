@@ -483,7 +483,11 @@ def matchFiles(drive_path):
         "ALSO NOTE! This csv will be fed into a python script that will run robocopy on it. Make sure the "
         "names are exactly right and that there is no fluff. Things must be perfectly formatted such that "
         "python can interpret this list and robocopy the files. Also note that robocopy supports directories "
-        "if applicable (see previous note)."
+        "if applicable (see previous note).\n\n"
+        "Final Note: All of the files that you are looking for are in one of three subfolders of \"U:\\ARS\\Data\\...\". Namely the imagery, geocode, and vector folders. There is no need to look in any other folders such as imagery_old, imagery_stage, vector_old, etc. Don't look in these folders.\n\n"
+        "SAFETY WARNING: The U drive you should treat as READ ONLY. Do not make any files here, even temporary files. You are just reading information from it.\n\n"
+        "CRITICAL: MAKE ABSOLUTE SURE THAT YOU FIND ALL FILES IN PACKFILES IN IMAGERY, VECTORS, AND GEOCODE!"
+
     )
     logging.info(f"Sending prompt to LLM in matchFiles: '{prompt}'")
     match_llm.use(prompt)
@@ -681,14 +685,6 @@ def process_drive(drive_path):
     except Exception as e:
         logging.error(f"FAILED to create directory {dobdir_path}. Exception details: {e}")
         return True
-
-    # ========================================================================
-    # CLEAR COMMENT MARKER FOR FURTHER PROCESSING
-    # ========================================================================
-    # This is where the rest of the functions that the program runs for 
-    # this drive will be placed. 
-    # ========================================================================
-    logging.debug(f"Reached placeholder for further processing on {drive_path}.")
     
     # Initialize the workVars.csv file in the dobDir directory
     workvars_path = os.path.join(dobdir_path, "workVars.csv")
