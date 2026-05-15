@@ -33,7 +33,7 @@ if %errorLevel% neq 0 (
     python --version >nul 2>&1
     if !errorLevel! neq 0 (
         echo [!] Python was installed but the PATH could not be dynamically refreshed.
-        echo [!] Please close this window, restart your terminal, and run setup.bat again.
+        echo [!] Please close this window, restart your terminal, and run win_setup.bat again.
         pause
         exit /b
     )
@@ -57,7 +57,7 @@ dism /online /enable-feature /featurename:IIS-WebServerRole /all /norestart >nul
 :: 4. Configure IIS Web Portal
 echo.
 echo [*] Configuring IIS Web Portal...
-set "SRVR_DIR=%~dp0srvr"
+set "SRVR_DIR=%~dp0..\srvr"
 :: Remove Default Web Site to free up port 80 if it exists
 %systemroot%\system32\inetsrv\appcmd delete site "Default Web Site" >nul 2>&1
 :: Add Dobinator Portal
@@ -74,13 +74,26 @@ powershell -Command "New-NetFirewallRule -DisplayName 'Dobinator Web API' -Direc
 :: 6. Set up the Companion API (Power Toggle Service) Task
 echo.
 echo [*] Setting up the Companion API Task...
-set "BAT_PATH=%~dp0srvr\start_api.bat"
+set "BAT_PATH=%~dp0..\srvr\start_api.bat"
 :: Fix for network drives: Run as standard user on logon, not SYSTEM or elevated.
 :: First, kill any existing background API processes that might be holding port 5050
 taskkill /F /IM pythonw.exe >nul 2>&1
 taskkill /F /IM python.exe >nul 2>&1
 :: Then, create the task to run on logon for any user (without highest privileges)
 schtasks /create /tn "Dobinator Web API" /tr "\"%BAT_PATH%\"" /sc onlogon /delay 0000:30 /f >nul 2>&1
+
+
+:: 7. Set up Git Updater
+echo.
+echo [*] Setting up Git Updater...
+git --version >nul 2>&1
+if %errorLevel% neq 0 (
+    echo [!] Git not found. Installing Git via Winget...
+    winget install -e --id Git.Git --accept-package-agreements --accept-source-agreements
+) else (
+    echo [+] Git is already installed.
+)
+call "%~dp0git_setup.bat"
 
 echo.
 echo =======================================================
