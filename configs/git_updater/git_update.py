@@ -1,14 +1,18 @@
-import time
-import datetime
-import json
 import os
+import json
 import subprocess
+import datetime
+import time
 import logging
+import urllib.request
+import zipfile
+import io
+import shutil
+import tempfile
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIGS_DIR = os.path.dirname(SCRIPT_DIR)
 PROJECT_ROOT = os.path.dirname(CONFIGS_DIR)
-STATUS_FILE = os.path.join(PROJECT_ROOT, "srvr", "status.json")
 LOG_FILE = os.path.join(PROJECT_ROOT, "logs", "gitLog.log")
 
 # Setup super verbose logging
@@ -17,152 +21,136 @@ os.makedirs(VERBOSE_LOG_DIR, exist_ok=True)
 VERBOSE_LOG_FILE = os.path.join(VERBOSE_LOG_DIR, "update.log")
 
 logging.basicConfig(
-    filename=VERBOSE_LOG_FILE,
     level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    handlers=[
+        logging.FileHandler(VERBOSE_LOG_FILE, mode='w'),
+        logging.StreamHandler()
+    ]
 )
 
 def log_event(message):
+    timestamp = datetime.datetime.now().strftime("%a %m/%d/%Y %H:%M:%S.%f")[:-4]
+    log_entry = f"{timestamp} - {message}\n"
     logging.info(f"Main Log Event: {message}")
-    now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    log_line = f"{now_str} - {message}\n"
     
+    # Prepend to the main log file
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
-    existing_content = ""
     if os.path.exists(LOG_FILE):
-        try:
-            with open(LOG_FILE, 'r', encoding='utf-8') as f:
-                existing_content = f.read()
-        except Exception as e:
-            logging.error(f"Error reading {LOG_FILE}: {e}")
-            
-    try:
-        with open(LOG_FILE, 'w', encoding='utf-8') as f:
-            f.write(log_line + existing_content)
-    except Exception as e:
-        logging.error(f"Error writing to {LOG_FILE}: {e}")
+        with open(LOG_FILE, 'r') as f:
+            existing_logs = f.read()
+    else:
+        existing_logs = ""
+        
+    with open(LOG_FILE, 'w') as f:
+        f.write(log_entry + existing_logs)
 
 def is_busy():
-    logging.debug(f"Checking if system is busy at {STATUS_FILE}")
-    if not os.path.exists(STATUS_FILE):
-        logging.debug("Status file does not exist, assuming not busy.")
+    status_file = os.path.join(PROJECT_ROOT, "srvr", "status.json")
+    logging.debug(f"Checking if system is busy at {status_file}")
+    if not os.path.exists(status_file):
+        logging.debug("status.json does not exist. System is not busy.")
         return False
+        
     try:
-        with open(STATUS_FILE, 'r', encoding='utf-8') as f:
+        with open(status_file, 'r') as f:
             data = json.load(f)
-            running = data.get("Running", 0)
-            status = data.get("StatusNumber", 0)
-            logging.debug(f"Parsed status: Running={running}, StatusNumber={status}")
             
-            # If Running is 0, it's not busy.
-            if running == 0:
-                logging.debug("Running is 0, system is not busy.")
-                return False
-            # If Running is 1, check StatusNumber
-            if status in [0, 10, 11]:
-                logging.debug("Status is idle (0, 10, 11), system is not busy.")
-                return False
-            logging.debug("System is busy processing files.")
-            return True
+        running = data.get("Running", 0)
+        status_num = data.get("StatusNumber", 0)
+        logging.debug(f"Parsed status: Running={running}, StatusNumber={status_num}")
+        
+        if running == 0:
+            logging.debug("Running is 0, system is not busy.")
+            return False
+            
+        # Idle states
+        if status_num in [0, 10, 11]:
+            logging.debug(f"Status is idle ({status_num}), system is not busy.")
+            return False
+            
+        logging.debug(f"System is busy. StatusNumber={status_num}")
+        return True
     except Exception as e:
-        logging.error(f"Failed to parse status file: {e}")
+        logging.error(f"Error reading status.json: {e}")
+        return False
+
+def is_running():
+    status_file = os.path.join(PROJECT_ROOT, "srvr", "status.json")
+    if not os.path.exists(status_file):
+        return False
+        
+    try:
+        with open(status_file, 'r') as f:
+            data = json.load(f)
+        return data.get("Running", 0) == 1
+    except Exception:
         return False
 
 def do_update():
     logging.info("Starting do_update process...")
     
-    # Ensure Git is in our PATH even if the terminal session is stale
-    git_paths = [
-        r"C:\Program Files\Git\cmd",
-        r"C:\Program Files\Git\bin",
-        r"C:\Program Files (x86)\Git\cmd",
-        r"C:\Program Files (x86)\Git\bin",
-        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Git\cmd")
-    ]
-    current_path = os.environ.get("PATH", "")
-    for gp in git_paths:
-        if os.path.exists(gp) and gp not in current_path:
-            current_path = gp + os.pathsep + current_path
-    os.environ["PATH"] = current_path
-    logging.debug(f"Ensured Git is in PATH.")
-
     if is_busy():
         logging.info("System determined as busy. Aborting update.")
         log_event("System is busy. Skipped clone for today.")
         return
-        
+
     logging.info("System not busy. Initiating update process...")
-    
-    # 1. Shut down the Dobinator if it's running
-    running = 0
-    try:
-        with open(STATUS_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            running = data.get("Running", 0)
-    except Exception as e:
-        logging.error(f"Failed to read Running status: {e}")
-        pass
-        
-    was_running = False
-    if running == 1:
+
+    if is_running():
         logging.info("System was running. Initiating shutdown via quit.bat...")
-        was_running = True
-        quit_bat = os.path.join(PROJECT_ROOT, "src", "quit.bat")
-        # CREATE_NO_WINDOW = 0x08000000
-        # By piping \r\n to stdin, we bypass the 'pause' command at the end of quit.bat
-        logging.debug(f"Running subprocess: {quit_bat}")
-        result = subprocess.run(["cmd.exe", "/c", quit_bat], cwd=PROJECT_ROOT, creationflags=0x08000000, input=b"\r\n", capture_output=True)
+        quit_path = os.path.join(PROJECT_ROOT, "src", "quit.bat")
+        # Pass \r\n to bypass any pause command at the end of the bat file
+        logging.debug(f"Running subprocess: {quit_path}")
+        result = subprocess.run(f'cmd.exe /c "{quit_path}"', shell=True, cwd=PROJECT_ROOT, creationflags=0x08000000, input=b"\r\n", capture_output=True)
         logging.debug(f"quit.bat output: {result.stdout}")
         logging.debug(f"quit.bat stderr: {result.stderr}")
+        
         logging.info("Sleeping 5 seconds to ensure shutdown completes...")
-        time.sleep(5) # wait for shutdown
+        time.sleep(5)
     else:
         logging.info("System was not running. Skipping shutdown step.")
         
-    # 2. Get latest copy of main branch and merge into local version
-    logging.info("Checking if directory is a git repository...")
-    git_folder = os.path.join(PROJECT_ROOT, ".git")
+    # 2. Get latest copy of main branch via ZIP download
+    logging.info("Downloading latest repository ZIP from GitHub...")
+    zip_url = "https://github.com/TheTrueProblematic/theDobinator/archive/refs/heads/main.zip"
     
     try:
-        if not os.path.exists(git_folder):
-            logging.info("Not a git repository. Initializing new git repo...")
-            subprocess.run("git init", shell=True, cwd=PROJECT_ROOT, creationflags=0x08000000)
-            subprocess.run("git remote add origin https://github.com/TheTrueProblematic/theDobinator.git", shell=True, cwd=PROJECT_ROOT, creationflags=0x08000000)
-            logging.info("Fetching from origin...")
-            subprocess.run("git fetch origin main", shell=True, cwd=PROJECT_ROOT, creationflags=0x08000000)
-            logging.info("Resetting hard to origin/main...")
-            result = subprocess.run("git reset --hard origin/main", shell=True, cwd=PROJECT_ROOT, creationflags=0x08000000, capture_output=True, text=True)
-            logging.debug(f"git reset output: {result.stdout}")
-            logging.debug(f"git reset stderr: {result.stderr}")
-            if result.returncode == 0:
-                logging.info("Git initialization and pull completed successfully.")
-                log_event("Cloned the latest version.")
-            else:
-                logging.error(f"Git reset failed with exit code {result.returncode}")
-                log_event(f"Failed to clone the latest version (exit code {result.returncode})")
-        else:
-            logging.info("Running git pull origin main...")
-            # Using shell=True and a string command helps locate git in PATH on Windows
-            result = subprocess.run("git pull origin main", shell=True, cwd=PROJECT_ROOT, creationflags=0x08000000, capture_output=True, text=True)
-            logging.debug(f"git pull output: {result.stdout}")
-            logging.debug(f"git pull stderr: {result.stderr}")
-            if result.returncode == 0:
-                logging.info("Git pull completed successfully.")
-                log_event("Cloned the latest version.")
-            else:
-                logging.error(f"Git pull failed with exit code {result.returncode}")
-                log_event(f"Failed to clone the latest version (exit code {result.returncode})")
+        req = urllib.request.Request(zip_url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as response:
+            zip_content = response.read()
+        
+        logging.info("Download complete. Extracting files...")
+        with zipfile.ZipFile(io.BytesIO(zip_content)) as zip_ref:
+            # The ZIP will contain a root folder like 'theDobinator-main/'
+            root_dir = zip_ref.namelist()[0].split('/')[0]
+            
+            with tempfile.TemporaryDirectory() as temp_dir:
+                zip_ref.extractall(temp_dir)
+                extracted_root = os.path.join(temp_dir, root_dir)
+                
+                # Copy files directly over the local ones
+                logging.info(f"Applying new files to {PROJECT_ROOT}...")
+                for item in os.listdir(extracted_root):
+                    s = os.path.join(extracted_root, item)
+                    d = os.path.join(PROJECT_ROOT, item)
+                    if os.path.isdir(s):
+                        shutil.copytree(s, d, dirs_exist_ok=True)
+                    else:
+                        shutil.copy2(s, d)
+                        
+        logging.info("ZIP download and extraction completed successfully.")
+        log_event("Downloaded and applied the latest version.")
     except Exception as e:
-        logging.error(f"Exception during git operations: {e}")
-        log_event(f"Failed to clone the latest version: {e}")
+        logging.error(f"Exception during download/extraction: {e}")
+        log_event(f"Failed to apply the latest version: {e}")
 
     # 3. Start the program running again
     logging.info("Initiating startup via dobWin.bat unconditionally...")
     dobwin_path = os.path.join(PROJECT_ROOT, "dobWin.bat")
     logging.debug(f"Running subprocess: {dobwin_path}")
     try:
-        # dobWin.bat toggles the program. Since we ensured it's off (or it was already off), this will turn it on.
+        # dobWin.bat toggles the program.
         result = subprocess.run(f'cmd.exe /c "{dobwin_path}"', shell=True, cwd=PROJECT_ROOT, creationflags=0x08000000, input=b"\r\n", capture_output=True)
         logging.debug(f"dobWin.bat output: {result.stdout}")
         logging.debug(f"dobWin.bat stderr: {result.stderr}")
@@ -172,4 +160,7 @@ def do_update():
     logging.info("do_update process completed.")
         
 if __name__ == "__main__":
-    do_update()
+    try:
+        do_update()
+    except Exception as e:
+        logging.critical(f"Unhandled exception in git_update.py: {e}", exc_info=True)
