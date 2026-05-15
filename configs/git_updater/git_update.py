@@ -113,7 +113,9 @@ def do_update():
         
     # 2. Get latest copy of main branch via ZIP download
     logging.info("Downloading latest repository ZIP from GitHub...")
-    zip_url = "https://github.com/TheTrueProblematic/theDobinator/archive/refs/heads/main.zip"
+    # Add a timestamp query parameter to explicitly bust GitHub's CDN cache!
+    cache_buster = int(time.time())
+    zip_url = f"https://github.com/TheTrueProblematic/theDobinator/archive/refs/heads/main.zip?t={cache_buster}"
     
     try:
         req = urllib.request.Request(zip_url, headers={'User-Agent': 'Mozilla/5.0'})
