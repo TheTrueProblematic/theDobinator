@@ -8,6 +8,20 @@ set "LOG_FILE=%LOG_DIR%\setup.log"
 echo %date% %time% - Starting Git Updater Setup >> "%LOG_FILE%"
 echo [*] Setting up the Git Updater Background Process...
 
+echo %date% %time% - Checking for Git installation >> "%LOG_FILE%"
+git --version >nul 2>&1
+if %errorLevel% neq 0 (
+    echo [!] Git not found. Installing Git via Winget...
+    echo %date% %time% - Git not found, running winget install >> "%LOG_FILE%"
+    winget install -e --id Git.Git --accept-package-agreements --accept-source-agreements >> "%LOG_FILE%" 2>&1
+    echo %date% %time% - Winget install completed with exit code %errorlevel% >> "%LOG_FILE%"
+) else (
+    echo [+] Git is already installed.
+    echo %date% %time% - Git is already installed >> "%LOG_FILE%"
+)
+
+echo.
+
 echo.
 echo %date% %time% - Defining VBS_PATH >> "%LOG_FILE%"
 :: Define paths

@@ -86,13 +86,6 @@ schtasks /create /tn "Dobinator Web API" /tr "\"%BAT_PATH%\"" /sc onlogon /delay
 :: 7. Set up Git Updater
 echo.
 echo [*] Setting up Git Updater...
-git --version >nul 2>&1
-if %errorLevel% neq 0 (
-    echo [!] Git not found. Installing Git via Winget...
-    winget install -e --id Git.Git --accept-package-agreements --accept-source-agreements
-) else (
-    echo [+] Git is already installed.
-)
 call "%~dp0git_setup.bat"
 
 echo.
