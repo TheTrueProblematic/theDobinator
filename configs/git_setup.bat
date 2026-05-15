@@ -67,7 +67,9 @@ set "VBS_PATH=%~dp0dobGit.vbs"
 echo %date% %time% - VBS_PATH is %VBS_PATH% >> "%LOG_FILE%"
 
 echo %date% %time% - Killing any existing wscript processes running dobGit.vbs >> "%LOG_FILE%"
-wmic process where "name='wscript.exe' and commandline like '%%dobGit.vbs%%'" call terminate >> "%LOG_FILE%" 2>&1
+:: wmic was removed by default on Windows 11. Use PowerShell to find and
+:: terminate any wscript.exe whose command line references dobGit.vbs.
+powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name = 'wscript.exe'\" | Where-Object { $_.CommandLine -match 'dobGit\.vbs' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }" >> "%LOG_FILE%" 2>&1
 
 :: --------------------------------------------------------------------
 :: 4. Create a scheduled task that re-launches the VBS watcher on every

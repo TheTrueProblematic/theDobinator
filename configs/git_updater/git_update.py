@@ -376,6 +376,14 @@ def do_git_update(git_exe):
         _resolve_untracked_conflicts(git_exe)
         run_git(git_exe, ["reset", "--hard", f"origin/{BRANCH}"], PROJECT_ROOT)
 
+    # Force the local branch to be `main` pointing at the current HEAD.
+    # `checkout -B main` creates the branch if missing, moves it if it exists,
+    # and is a no-op if we're already on a main pointing at HEAD. This stops
+    # the alarming "fatal: branch 'main' does not exist" message from
+    # set-upstream-to when the existing .git was initialized with a different
+    # default branch name (e.g. master or a detached state from a partial init).
+    run_git(git_exe, ["checkout", "-B", BRANCH], PROJECT_ROOT, check=False)
+
     run_git(
         git_exe,
         ["branch", "--set-upstream-to", f"origin/{BRANCH}", BRANCH],
