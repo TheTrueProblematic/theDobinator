@@ -124,22 +124,30 @@ def do_update():
         
         logging.info("Download complete. Extracting files...")
         with zipfile.ZipFile(io.BytesIO(zip_content)) as zip_ref:
-            # The ZIP will contain a root folder like 'theDobinator-main/'
-            root_dir = zip_ref.namelist()[0].split('/')[0]
-            
             with tempfile.TemporaryDirectory() as temp_dir:
                 zip_ref.extractall(temp_dir)
-                extracted_root = os.path.join(temp_dir, root_dir)
+                
+                # GitHub ZIPs extract into a single top-level folder (e.g., theDobinator-main)
+                extracted_items = os.listdir(temp_dir)
+                if len(extracted_items) == 1 and os.path.isdir(os.path.join(temp_dir, extracted_items[0])):
+                    extracted_root = os.path.join(temp_dir, extracted_items[0])
+                else:
+                    extracted_root = temp_dir
                 
                 # Copy files directly over the local ones
-                logging.info(f"Applying new files to {PROJECT_ROOT}...")
+                logging.info(f"Applying new files from {extracted_root} to {PROJECT_ROOT}...")
+                copied_items = []
                 for item in os.listdir(extracted_root):
                     s = os.path.join(extracted_root, item)
                     d = os.path.join(PROJECT_ROOT, item)
                     if os.path.isdir(s):
                         shutil.copytree(s, d, dirs_exist_ok=True)
+                        copied_items.append(f"[DIR] {item}")
                     else:
                         shutil.copy2(s, d)
+                        copied_items.append(f"[FILE] {item}")
+                        
+                logging.info(f"Successfully applied {len(copied_items)} items: {', '.join(copied_items)}")
                         
         logging.info("ZIP download and extraction completed successfully.")
         log_event("Downloaded and applied the latest version.")
