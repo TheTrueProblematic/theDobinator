@@ -121,20 +121,40 @@ def do_update():
         logging.info("System was not running. Skipping shutdown step.")
         
     # 2. Get latest copy of main branch and merge into local version
-    logging.info("Running git pull origin main...")
+    logging.info("Checking if directory is a git repository...")
+    git_folder = os.path.join(PROJECT_ROOT, ".git")
+    
     try:
-        # Using shell=True and a string command helps locate git in PATH on Windows
-        result = subprocess.run("git pull origin main", shell=True, cwd=PROJECT_ROOT, creationflags=0x08000000, capture_output=True, text=True)
-        logging.debug(f"git pull output: {result.stdout}")
-        logging.debug(f"git pull stderr: {result.stderr}")
-        if result.returncode == 0:
-            logging.info("Git pull completed successfully.")
-            log_event("Cloned the latest version.")
+        if not os.path.exists(git_folder):
+            logging.info("Not a git repository. Initializing new git repo...")
+            subprocess.run("git init", shell=True, cwd=PROJECT_ROOT, creationflags=0x08000000)
+            subprocess.run("git remote add origin https://github.com/TheTrueProblematic/theDobinator.git", shell=True, cwd=PROJECT_ROOT, creationflags=0x08000000)
+            logging.info("Fetching from origin...")
+            subprocess.run("git fetch origin main", shell=True, cwd=PROJECT_ROOT, creationflags=0x08000000)
+            logging.info("Resetting hard to origin/main...")
+            result = subprocess.run("git reset --hard origin/main", shell=True, cwd=PROJECT_ROOT, creationflags=0x08000000, capture_output=True, text=True)
+            logging.debug(f"git reset output: {result.stdout}")
+            logging.debug(f"git reset stderr: {result.stderr}")
+            if result.returncode == 0:
+                logging.info("Git initialization and pull completed successfully.")
+                log_event("Cloned the latest version.")
+            else:
+                logging.error(f"Git reset failed with exit code {result.returncode}")
+                log_event(f"Failed to clone the latest version (exit code {result.returncode})")
         else:
-            logging.error(f"Git pull failed with exit code {result.returncode}")
-            log_event(f"Failed to clone the latest version (exit code {result.returncode})")
+            logging.info("Running git pull origin main...")
+            # Using shell=True and a string command helps locate git in PATH on Windows
+            result = subprocess.run("git pull origin main", shell=True, cwd=PROJECT_ROOT, creationflags=0x08000000, capture_output=True, text=True)
+            logging.debug(f"git pull output: {result.stdout}")
+            logging.debug(f"git pull stderr: {result.stderr}")
+            if result.returncode == 0:
+                logging.info("Git pull completed successfully.")
+                log_event("Cloned the latest version.")
+            else:
+                logging.error(f"Git pull failed with exit code {result.returncode}")
+                log_event(f"Failed to clone the latest version (exit code {result.returncode})")
     except Exception as e:
-        logging.error(f"Exception during git pull: {e}")
+        logging.error(f"Exception during git operations: {e}")
         log_event(f"Failed to clone the latest version: {e}")
 
     # 3. Start the program running again
