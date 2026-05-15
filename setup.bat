@@ -45,7 +45,7 @@ if %errorLevel% neq 0 (
 echo.
 echo [*] Installing Python Dependencies...
 python -m pip install --upgrade pip
-python -m pip install setuptools
+python -m pip install "setuptools<70.0.0"
 python -m pip install open-interpreter
 python -m pip install ipykernel
 
@@ -75,11 +75,16 @@ powershell -Command "New-NetFirewallRule -DisplayName 'Dobinator Web API' -Direc
 echo.
 echo [*] Setting up the Companion API Task...
 set "BAT_PATH=%~dp0srvr\start_api.bat"
-schtasks /create /tn "Dobinator Web API" /tr "\"%BAT_PATH%\"" /sc onstart /delay 0000:30 /ru SYSTEM /f >nul 2>&1
+:: Fix for elevated tasks not seeing mapped network drives (U: and G:)
+reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v EnableLinkedConnections /t REG_DWORD /d 1 /f >nul 2>&1
+schtasks /create /tn "Dobinator Web API" /tr "\"%BAT_PATH%\"" /sc onlogon /delay 0000:30 /rl highest /f >nul 2>&1
 
 echo.
 echo =======================================================
 echo [+] Setup is complete!
 echo [+] theDobinator dependencies and system settings are ready.
+echo [+] NOTE: A reboot is required for network drive access to apply.
 echo =======================================================
-pause
+echo Press any key to reboot now, or close this window to reboot later...
+pause >nul
+shutdown /r /t 0

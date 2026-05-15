@@ -62,7 +62,6 @@ function progressBlock(label, completed, total) {
 
 function spinnerHeadline(text) {
   return `
-    <div class="eyebrow"><span class="eyebrow-dot"></span> Working</div>
     <h1 class="headline">
       ${ICONS.spinner}
       <span>${esc(text)}<span class="dots"><span>.</span><span>.</span><span>.</span></span></span>

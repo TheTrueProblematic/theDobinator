@@ -36,11 +36,11 @@ To set up theDobinator from scratch on a brand new Windows 11 computer, follow t
 3. **Install Python Dependencies**
    - Open a command prompt and install the required packages:
      ```cmd
-     pip install setuptools
+     pip install "setuptools<70.0.0"
      pip install open-interpreter
      python -m pip install ipykernel
      ```
-   - *Note: `setuptools` is required to fix missing pkg_resources errors on fresh installs, and `ipykernel` is strictly required. Without it, Open Interpreter will hang silently forever when attempting to execute Python code.*
+   - *Note: `setuptools<70.0.0` is required to fix missing pkg_resources errors on fresh installs because newer versions of setuptools have removed it. `ipykernel` is strictly required. Without it, Open Interpreter will hang silently forever when attempting to execute Python code.*
 
 4. **Enable IIS (Internet Information Services)**
    - Open the Start Menu and search for **"Turn Windows features on or off"**.
@@ -55,9 +55,10 @@ To set up theDobinator from scratch on a brand new Windows 11 computer, follow t
 6. **Set up the Companion API (Power Toggle Service)**
    - Open **Task Scheduler**.
    - Create a new task (using "Create Task...") named "Dobinator Web API".
-   - Set it to **"Run whether user is logged on or not"** and check **"Run with highest privileges"**.
-   - Add a Trigger to begin the task **"At startup"** (with a 30-second delay).
+   - Set it to **"Run only when user is logged on"** and check **"Run with highest privileges"**.
+   - Add a Trigger to begin the task **"At log on"** (with a 30-second delay) for any user.
    - Add an Action to "Start a program", pointing it to `srvr\start_api.bat` within your cloned repo.
+   - *Note: `setup.bat` configures the `EnableLinkedConnections` registry key so that elevated tasks can see your mapped network drives. A restart is required for this to apply.*
 
 7. **Configure Windows Firewall**
    - Open PowerShell as Administrator and run the following to allow inbound traffic:
