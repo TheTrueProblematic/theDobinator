@@ -71,6 +71,22 @@ def is_busy():
 
 def do_update():
     logging.info("Starting do_update process...")
+    
+    # Ensure Git is in our PATH even if the terminal session is stale
+    git_paths = [
+        r"C:\Program Files\Git\cmd",
+        r"C:\Program Files\Git\bin",
+        r"C:\Program Files (x86)\Git\cmd",
+        r"C:\Program Files (x86)\Git\bin",
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Git\cmd")
+    ]
+    current_path = os.environ.get("PATH", "")
+    for gp in git_paths:
+        if os.path.exists(gp) and gp not in current_path:
+            current_path = gp + os.pathsep + current_path
+    os.environ["PATH"] = current_path
+    logging.debug(f"Ensured Git is in PATH.")
+
     if is_busy():
         logging.info("System determined as busy. Aborting update.")
         log_event("System is busy. Skipped clone for today.")
