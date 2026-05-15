@@ -45,6 +45,7 @@ if %errorLevel% neq 0 (
 echo.
 echo [*] Installing Python Dependencies...
 python -m pip install --upgrade pip
+python -m pip install setuptools
 python -m pip install open-interpreter
 python -m pip install ipykernel
 

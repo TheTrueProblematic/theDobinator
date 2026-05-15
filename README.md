@@ -36,10 +36,11 @@ To set up theDobinator from scratch on a brand new Windows 11 computer, follow t
 3. **Install Python Dependencies**
    - Open a command prompt and install the required packages:
      ```cmd
+     pip install setuptools
      pip install open-interpreter
      python -m pip install ipykernel
      ```
-   - *Note: `ipykernel` is strictly required. Without it, Open Interpreter will hang silently forever when attempting to execute Python code.*
+   - *Note: `setuptools` is required to fix missing pkg_resources errors on fresh installs, and `ipykernel` is strictly required. Without it, Open Interpreter will hang silently forever when attempting to execute Python code.*
 
 4. **Enable IIS (Internet Information Services)**
    - Open the Start Menu and search for **"Turn Windows features on or off"**.
