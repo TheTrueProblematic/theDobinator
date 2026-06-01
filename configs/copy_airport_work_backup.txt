@@ -1,0 +1,281 @@
+================================================================================
+BACKUP OF WORK: copy_airport feature for src/dobd.py
+Saved so it can be re-applied after a `git pull` overwrites the working tree.
+================================================================================
+
+GOAL
+----
+Add a `copy_airport` step to the process_drive() pipeline in src/dobd.py.
+It must run AFTER copy_region_files(...) and BEFORE matchFiles(...).
+
+The copy_airport function must:
+  1. Copy U:\ARS\Data\airport\airport.zip into the target drive's
+     <drive>\ARS\data folder (that folder WILL already exist).
+  2. Unzip its contents into a new folder called "airport"
+     (i.e. <drive>\ARS\data\airport).
+  3. Delete the copied airport.zip from the drive, leaving only the
+     extracted contents in the airport folder.
+
+Also add and run testing to ensure it works.
+
+
+================================================================================
+CHANGE 1 — add the zipfile import (top of src/dobd.py)
+================================================================================
+Add `import zipfile` to the stdlib imports block. The original block was:
+
+    import shutil
+    import subprocess
+    import json
+
+Change it to:
+
+    import shutil
+    import subprocess
+    import json
+    import zipfile
+
+NOTE: After the git pull, the import block may have changed (e.g. it may
+also include `import threading` / `import queue`). Just ensure `import zipfile`
+is present among the imports; place it alongside the other stdlib imports.
+
+
+================================================================================
+CHANGE 2 — add the AIRPORT_ZIP_SOURCE constant + copy_airport function
+================================================================================
+Insert this block in src/dobd.py immediately AFTER the end of the
+copy_region_files() function (which ends with the line:
+
+    logging.info(f"--- Finished File Copy Process. Successfully copied {completedBaseFiles} out of {totalBaseFiles} items. ---")
+
+) and immediately BEFORE the `def matchFiles(drive_path):` line.
+
+------------------------------ BEGIN INSERT ------------------------------
+# Source location of the airport archive on the U drive.
+AIRPORT_ZIP_SOURCE = r"U:\ARS\Data\airport\airport.zip"
+
+def copy_airport(drive_path, source_zip=AIRPORT_ZIP_SOURCE):
+    """
+    Copies airport.zip from the U drive into the target drive's ARS\\data folder,
+    extracts its contents into a new 'airport' subfolder, then deletes the copied
+    zip so that only its extracted contents remain.
+    """
+    logging.info("--- Starting copy_airport Process ---")
+
+    # The ARS\data folder is expected to already exist (created by copy_region_files).
+    data_dir = os.path.join(drive_path, "ARS", "data")
+    dest_zip = os.path.join(data_dir, "airport.zip")
+    airport_dir = os.path.join(data_dir, "airport")
+
+    logging.debug(f"copy_airport source zip: {source_zip}")
+    logging.debug(f"copy_airport destination data dir: {data_dir}")
+    logging.debug(f"copy_airport destination zip: {dest_zip}")
+    logging.debug(f"copy_airport extraction dir: {airport_dir}")
+
+    if not os.path.exists(source_zip):
+        logging.error(f"Airport source zip not found at {source_zip}. Skipping copy_airport.")
+        return
+
+    if not os.path.isdir(data_dir):
+        logging.error(f"Destination data folder does not exist at {data_dir}. Skipping copy_airport.")
+        return
+
+    # 1. Copy the zip from U: to the drive's ARS\data folder.
+    try:
+        logging.info(f"Copying airport.zip from {source_zip} to {dest_zip}")
+        shutil.copy2(source_zip, dest_zip)
+        logging.info(f"SUCCESS: Copied airport.zip to {dest_zip}")
+    except Exception as e:
+        logging.error(f"FAILED to copy airport.zip from {source_zip} to {dest_zip}: {e}")
+        return
+
+    # 2. Unzip its contents into a new 'airport' folder.
+    try:
+        logging.info(f"Extracting {dest_zip} into {airport_dir}")
+        os.makedirs(airport_dir, exist_ok=True)
+        with zipfile.ZipFile(dest_zip, 'r') as zf:
+            zf.extractall(airport_dir)
+        logging.info(f"SUCCESS: Extracted airport.zip into {airport_dir}")
+    except Exception as e:
+        logging.error(f"FAILED to extract {dest_zip} into {airport_dir}: {e}")
+        return
+
+    # 3. Delete the copied zip, leaving only its extracted contents behind.
+    try:
+        os.remove(dest_zip)
+        logging.info(f"SUCCESS: Deleted {dest_zip}, leaving contents in {airport_dir}")
+    except Exception as e:
+        logging.error(f"FAILED to delete {dest_zip}: {e}")
+
+    logging.info("--- Finished copy_airport Process ---")
+
+------------------------------- END INSERT -------------------------------
+
+
+================================================================================
+CHANGE 3 — wire copy_airport into process_drive()
+================================================================================
+In process_drive(), find this block:
+
+    # Run the file copy process
+    copy_region_files(drive_path, work_vars)
+
+    # Run the matchFiles process to find the rest of the files
+    matchFiles(drive_path)
+
+Replace it with:
+
+    # Run the file copy process
+    copy_region_files(drive_path, work_vars)
+
+    # Copy and extract the airport archive into ARS\data\airport
+    copy_airport(drive_path)
+
+    # Run the matchFiles process to find the rest of the files
+    matchFiles(drive_path)
+
+(The key requirement: copy_airport(drive_path) is called between
+copy_region_files(...) and matchFiles(...).)
+
+
+================================================================================
+CHANGE 4 — create the test file at project root: test_copy_airport.py
+================================================================================
+Full contents below.
+
+------------------------------ BEGIN FILE: test_copy_airport.py ------------------------------
+"""
+Tests for the copy_airport function in src/dobd.py.
+
+These tests build a fake source airport.zip and a fake target drive in temp
+directories so they can run without the real U: drive or any physical media.
+
+Run directly:  python test_copy_airport.py
+"""
+import os
+import sys
+import shutil
+import tempfile
+import zipfile
+
+# Make the src directory importable.
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(SCRIPT_DIR, "src"))
+
+import dobd
+
+
+def _make_source_zip(zip_dir):
+    """Create a source airport.zip containing a couple of known files."""
+    os.makedirs(zip_dir, exist_ok=True)
+    source_zip = os.path.join(zip_dir, "airport.zip")
+    with zipfile.ZipFile(source_zip, "w") as zf:
+        zf.writestr("runways.dat", "RW01\nRW19\n")
+        zf.writestr("sub/towers.dat", "TWR1\n")
+    return source_zip
+
+
+def _make_drive():
+    """Create a fake drive root with an existing ARS\\data folder."""
+    drive_root = tempfile.mkdtemp(prefix="dob_drive_")
+    data_dir = os.path.join(drive_root, "ARS", "data")
+    os.makedirs(data_dir)
+    return drive_root, data_dir
+
+
+def test_happy_path():
+    """Zip is copied, extracted into airport/, and the copied zip is deleted."""
+    tmp = tempfile.mkdtemp(prefix="dob_src_")
+    drive_root, data_dir = _make_drive()
+    try:
+        source_zip = _make_source_zip(tmp)
+
+        dobd.copy_airport(drive_root, source_zip=source_zip)
+
+        airport_dir = os.path.join(data_dir, "airport")
+        dest_zip = os.path.join(data_dir, "airport.zip")
+
+        assert os.path.isdir(airport_dir), "airport folder was not created"
+        assert not os.path.exists(dest_zip), "airport.zip should have been deleted"
+        assert os.path.isfile(os.path.join(airport_dir, "runways.dat")), \
+            "runways.dat missing from extracted contents"
+        assert os.path.isfile(os.path.join(airport_dir, "sub", "towers.dat")), \
+            "nested towers.dat missing from extracted contents"
+
+        with open(os.path.join(airport_dir, "runways.dat")) as f:
+            assert f.read() == "RW01\nRW19\n", "extracted content mismatch"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(drive_root, ignore_errors=True)
+    print("PASS: test_happy_path")
+
+
+def test_missing_source_is_safe():
+    """A missing source zip must not raise and must not create anything."""
+    drive_root, data_dir = _make_drive()
+    try:
+        missing = os.path.join(data_dir, "does_not_exist.zip")
+        dobd.copy_airport(drive_root, source_zip=missing)
+
+        assert not os.path.exists(os.path.join(data_dir, "airport")), \
+            "airport folder should not be created when source is missing"
+        assert not os.path.exists(os.path.join(data_dir, "airport.zip")), \
+            "no zip should be left behind when source is missing"
+    finally:
+        shutil.rmtree(drive_root, ignore_errors=True)
+    print("PASS: test_missing_source_is_safe")
+
+
+def test_missing_data_dir_is_safe():
+    """A missing ARS\\data folder must not raise and must not copy the zip."""
+    tmp = tempfile.mkdtemp(prefix="dob_src_")
+    drive_root = tempfile.mkdtemp(prefix="dob_drive_")  # no ARS\data created
+    try:
+        source_zip = _make_source_zip(tmp)
+        dobd.copy_airport(drive_root, source_zip=source_zip)
+
+        assert not os.path.exists(os.path.join(drive_root, "ARS", "data", "airport.zip")), \
+            "zip should not be copied when data dir is missing"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(drive_root, ignore_errors=True)
+    print("PASS: test_missing_data_dir_is_safe")
+
+
+def test_called_between_region_copy_and_matchfiles():
+    """copy_airport must run after copy_region_files and before matchFiles in process_drive."""
+    import inspect
+    src = inspect.getsource(dobd.process_drive)
+    i_region = src.index("copy_region_files(")
+    i_airport = src.index("copy_airport(")
+    i_match = src.index("matchFiles(")
+    assert i_region < i_airport < i_match, \
+        "copy_airport must be called after copy_region_files and before matchFiles"
+    print("PASS: test_called_between_region_copy_and_matchfiles")
+
+
+if __name__ == "__main__":
+    test_happy_path()
+    test_missing_source_is_safe()
+    test_missing_data_dir_is_safe()
+    test_called_between_region_copy_and_matchfiles()
+    print("\nAll copy_airport tests passed.")
+------------------------------- END FILE: test_copy_airport.py -------------------------------
+
+
+================================================================================
+HOW TO RE-VERIFY AFTER RE-APPLYING
+================================================================================
+From the project root:
+
+    python -c "import py_compile; py_compile.compile('src/dobd.py', doraise=True); print('compile ok')"
+    python test_copy_airport.py
+
+Expected: all four tests print PASS and the script ends with
+"All copy_airport tests passed." (The ERROR log lines for the two
+"missing" tests are expected — those cases deliberately exercise the
+safety guards.)
+
+================================================================================
+END OF BACKUP
+================================================================================

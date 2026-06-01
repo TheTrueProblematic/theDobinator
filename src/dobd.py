@@ -9,6 +9,7 @@ import subprocess
 import json
 import threading
 import queue
+import zipfile
 
 # --- Logging Setup ---
 # Find the project root by going up one level from the 'src' directory
@@ -485,6 +486,64 @@ def copy_region_files(drive_path, work_vars):
 
     logging.info(f"--- Finished File Copy Process. Successfully copied {completedBaseFiles} out of {totalBaseFiles} items. ---")
 
+# Source location of the airport archive on the U drive.
+AIRPORT_ZIP_SOURCE = r"U:\ARS\Data\airport\airport.zip"
+
+def copy_airport(drive_path, source_zip=AIRPORT_ZIP_SOURCE):
+    """
+    Copies airport.zip from the U drive into the target drive's ARS\\data folder,
+    extracts its contents into a new 'airport' subfolder, then deletes the copied
+    zip so that only its extracted contents remain.
+    """
+    logging.info("--- Starting copy_airport Process ---")
+
+    # The ARS\data folder is expected to already exist (created by copy_region_files).
+    data_dir = os.path.join(drive_path, "ARS", "data")
+    dest_zip = os.path.join(data_dir, "airport.zip")
+    airport_dir = os.path.join(data_dir, "airport")
+
+    logging.debug(f"copy_airport source zip: {source_zip}")
+    logging.debug(f"copy_airport destination data dir: {data_dir}")
+    logging.debug(f"copy_airport destination zip: {dest_zip}")
+    logging.debug(f"copy_airport extraction dir: {airport_dir}")
+
+    if not os.path.exists(source_zip):
+        logging.error(f"Airport source zip not found at {source_zip}. Skipping copy_airport.")
+        return
+
+    if not os.path.isdir(data_dir):
+        logging.error(f"Destination data folder does not exist at {data_dir}. Skipping copy_airport.")
+        return
+
+    # 1. Copy the zip from U: to the drive's ARS\data folder.
+    try:
+        logging.info(f"Copying airport.zip from {source_zip} to {dest_zip}")
+        shutil.copy2(source_zip, dest_zip)
+        logging.info(f"SUCCESS: Copied airport.zip to {dest_zip}")
+    except Exception as e:
+        logging.error(f"FAILED to copy airport.zip from {source_zip} to {dest_zip}: {e}")
+        return
+
+    # 2. Unzip its contents into a new 'airport' folder.
+    try:
+        logging.info(f"Extracting {dest_zip} into {airport_dir}")
+        os.makedirs(airport_dir, exist_ok=True)
+        with zipfile.ZipFile(dest_zip, 'r') as zf:
+            zf.extractall(airport_dir)
+        logging.info(f"SUCCESS: Extracted airport.zip into {airport_dir}")
+    except Exception as e:
+        logging.error(f"FAILED to extract {dest_zip} into {airport_dir}: {e}")
+        return
+
+    # 3. Delete the copied zip, leaving only its extracted contents behind.
+    try:
+        os.remove(dest_zip)
+        logging.info(f"SUCCESS: Deleted {dest_zip}, leaving contents in {airport_dir}")
+    except Exception as e:
+        logging.error(f"FAILED to delete {dest_zip}: {e}")
+
+    logging.info("--- Finished copy_airport Process ---")
+
 def matchFiles(drive_path):
     """
     Instructs the AI on how to actually find the rest of the files.
@@ -744,7 +803,10 @@ def process_drive(drive_path):
     
     # Run the file copy process
     copy_region_files(drive_path, work_vars)
-    
+
+    # Copy and extract the airport archive into ARS\data\airport
+    copy_airport(drive_path)
+
     # Run the matchFiles process to find the rest of the files
     matchFiles(drive_path)
     
