@@ -12,6 +12,7 @@ import threading
 import queue
 import zipfile
 import datetime
+import tempfile
 import urllib.request
 import urllib.error
 
@@ -32,6 +33,10 @@ PREV_LOG_FILE = os.path.join(LOGS_DIR, "dobLogPrev.log")
 # drowned out by the once-a-second polling chatter.
 POLLING_LOG_FILE = os.path.join(LOGS_DIR, "pollingLog.log")
 POLLING_PREV_LOG_FILE = os.path.join(LOGS_DIR, "pollingLogPrev.log")
+# Dedicated log for the Open Interpreter subprocess runs (their verbose output
+# is captured by dobd.py and funneled here, keeping it out of dobLog.log).
+LLM_LOG_FILE = os.path.join(LOGS_DIR, "llmRunner.log")
+LLM_PREV_LOG_FILE = os.path.join(LOGS_DIR, "llmRunnerPrev.log")
 RUN_SEPARATOR = "\n" + "="*50 + " END OF RUN " + "="*50 + "\n"
 
 # --- Completed-drive history (persisted forever) ---
@@ -112,6 +117,7 @@ def rotate_prev_log(log_file, prev_log_file):
 # Maintain the past 5 runs in each *Prev.log before the handlers truncate them.
 rotate_prev_log(LOG_FILE, PREV_LOG_FILE)
 rotate_prev_log(POLLING_LOG_FILE, POLLING_PREV_LOG_FILE)
+rotate_prev_log(LLM_LOG_FILE, LLM_PREV_LOG_FILE)
 
 class LessNoiseFilter(logging.Filter):
     def filter(self, record):
@@ -176,6 +182,19 @@ plog.setLevel(logging.DEBUG)
 plog.propagate = False
 plog.addHandler(polling_file_handler)
 plog.addHandler(stream_handler)
+
+# --- Dedicated Open Interpreter runner logger ---
+# The (very verbose) output of each Open Interpreter subprocess is captured by
+# the LLM class and written here -> llmRunner.log, kept out of dobLog.log.
+llm_file_handler = logging.FileHandler(LLM_LOG_FILE, mode='w', encoding='utf-8')
+llm_file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+llm_file_handler.addFilter(noise_filter)
+
+llmlog = logging.getLogger("dobinator.llm")
+llmlog.setLevel(logging.DEBUG)
+llmlog.propagate = False
+llmlog.addHandler(llm_file_handler)
+llmlog.addHandler(stream_handler)
 
 STATUS_FILE = os.path.join(PROJECT_ROOT, "srvr", "status.json")
 
@@ -355,13 +374,57 @@ class WorkVars:
         return None
 
 
+def _kill_process_tree(proc):
+    """
+    Kill a subprocess AND its descendants. Critical here because the Open
+    Interpreter runner spawns a Jupyter kernel as a grandchild; killing only the
+    runner would orphan the kernel. On Windows we use `taskkill /T`.
+    """
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                creationflags=0x08000000,  # CREATE_NO_WINDOW
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            proc.kill()
+    except Exception as e:
+        logging.error(f"Failed to kill LLM subprocess tree (pid={proc.pid}): {e}")
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+# Hard ceiling for a single Open Interpreter run. Legitimate matchFiles runs can
+# take ~15-20 minutes, so this is generous; it exists purely so a hung kernel can
+# never freeze a drive build forever (the historical "Matching Specific Files"
+# bug). It is a safety net — the subprocess isolation is what actually prevents
+# the hang.
+LLM_RUN_TIMEOUT_S = 2700  # 45 minutes
+
+
 class LLM:
     """
-    A class to interact with a remote LLM using OpenInterpreter.
-    Each instance maintains its own context and conversation history separately.
+    Interacts with a remote LLM via Open Interpreter, but runs every chat in its
+    OWN SUBPROCESS (src/llm_runner.py) rather than in-process.
+
+    This is deliberate: Open Interpreter relies on Jupyter/ipykernel + asyncio +
+    signal handling, which only behave reliably on a process's MAIN thread. Since
+    dobd.py processes drives on a background worker thread, running Open
+    Interpreter inline there caused intermittent, permanent kernel hangs (the
+    "Matching Specific Files" freeze). A subprocess gets a real main thread, full
+    isolation (its own CWD and kernel), and — crucially — a boundary we can
+    enforce a hard timeout on and kill if it ever exceeds it.
+
+    Each instance is used for a single prompt, so no cross-call conversation
+    state is lost by running one-shot subprocesses.
     """
-    def __init__(self, ip_address="192.168.11.65", port=1234, working_directory=None, 
-                 model="openai/qwen/qwen3.6-27b", context_window=40000, api_key="fake_key", max_tokens=4096):
+    def __init__(self, ip_address="192.168.11.65", port=1234, working_directory=None,
+                 model="openai/qwen/qwen3.6-27b", context_window=40000, api_key="fake_key",
+                 max_tokens=4096, timeout=LLM_RUN_TIMEOUT_S):
         self.ip_address = ip_address
         self.port = port
         self.working_directory = working_directory
@@ -369,37 +432,11 @@ class LLM:
         self.context_window = context_window
         self.api_key = api_key
         self.max_tokens = max_tokens
-        import sys
-        import os
-
-        # Try to import open-interpreter, with a fallback to the common pipx installation path
-        try:
-            from interpreter import OpenInterpreter
-        except ImportError:
-            # Expand ~ to the user's home directory to find the pipx environment
-            pipx_path = os.path.expanduser(r"~\pipx\venvs\open-interpreter\Lib\site-packages")
-            if os.path.exists(pipx_path) and pipx_path not in sys.path:
-                sys.path.append(pipx_path)
-            
-            try:
-                from interpreter import OpenInterpreter
-            except ImportError:
-                logging.error("Failed to import 'interpreter'. Ensure Open Interpreter is installed (e.g., via pipx or in the current environment).")
-                raise
-
-        # Initialize an isolated OpenInterpreter instance to keep conversation history separate
-        self.interpreter = OpenInterpreter()
-        self.interpreter.llm.api_base = f"http://{self.ip_address}:{self.port}/v1"
-        self.interpreter.llm.model = self.model
-        self.interpreter.llm.api_key = self.api_key
-        self.interpreter.llm.context_window = self.context_window
-        self.interpreter.llm.max_tokens = self.max_tokens
-        self.interpreter.auto_run = True  # Avoids prompting for user confirmation, similar to -y
-        
-        if hasattr(self.interpreter.llm, 'temperature'):
-            self.interpreter.llm.temperature = 0
-
-        logging.debug(f"LLM instance initialized using model {self.model} at {self.interpreter.llm.api_base}")
+        self.timeout = timeout
+        logging.debug(
+            f"LLM configured for model {self.model} at "
+            f"http://{self.ip_address}:{self.port}/v1 (subprocess mode, timeout={self.timeout}s)"
+        )
 
     def use(self, prompt):
         """Runs the prompt in the working directory set during initialization."""
@@ -409,30 +446,101 @@ class LLM:
         return self.useLoc(prompt, self.working_directory)
 
     def useLoc(self, prompt, directory):
-        """Runs the prompt in the specified directory."""
-        original_cwd = os.getcwd()
-        
-        # Validate and change to the specified directory
-        if directory and os.path.exists(directory):
-            os.chdir(directory)
-            logging.debug(f"LLM executing in directory: {directory}")
-        else:
+        """
+        Run the prompt in `directory` by launching llm_runner.py as a subprocess.
+        Returns the runner's exit code (0 = success), or None on failure/timeout.
+        Side effects the callers rely on (files written by the LLM) land on the
+        real filesystem exactly as before.
+        """
+        if not (directory and os.path.exists(directory)):
             logging.error(f"Directory {directory} does not exist. Cannot execute prompt.")
             return None
-            
+
+        runner = os.path.join(SCRIPT_DIR, "llm_runner.py")
+        if not os.path.exists(runner):
+            logging.error(f"llm_runner.py not found at {runner}; cannot run LLM.")
+            return None
+
+        cfg = {
+            "ip_address": self.ip_address,
+            "port": self.port,
+            "model": self.model,
+            "context_window": self.context_window,
+            "api_key": self.api_key,
+            "max_tokens": self.max_tokens,
+            "working_directory": directory,
+            "prompt": prompt,
+        }
+
+        cfg_fd, cfg_path = tempfile.mkstemp(prefix="dob_llm_", suffix=".json")
         try:
-            logging.info(f"LLM executing prompt: '{prompt}'")
-            # The interpreter.chat method handles the execution and conversation history
-            response = self.interpreter.chat(prompt)
-            return response
+            with os.fdopen(cfg_fd, "w", encoding="utf-8") as f:
+                json.dump(cfg, f)
+
+            logging.info(f"LLM executing prompt in {directory} via subprocess (timeout={self.timeout}s).")
+            llmlog.info("=" * 70)
+            llmlog.info(f"LLM RUN START — model={self.model}  dir={directory}")
+            llmlog.info(f"PROMPT: {prompt}")
+
+            creationflags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
+            proc = subprocess.Popen(
+                [sys.executable, runner, cfg_path],
+                cwd=directory,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                creationflags=creationflags,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+            )
+
+            # Pump the child's output into the dedicated LLM log on a helper
+            # thread so we keep full visibility without blocking the timeout.
+            def _pump():
+                try:
+                    for line in proc.stdout:
+                        llmlog.debug(line.rstrip("\n"))
+                except Exception:
+                    pass
+
+            pump = threading.Thread(target=_pump, daemon=True)
+            pump.start()
+
+            try:
+                proc.wait(timeout=self.timeout)
+            except subprocess.TimeoutExpired:
+                logging.error(
+                    f"LLM subprocess exceeded the {self.timeout}s timeout — killing it. "
+                    "This is the guard against the historical 'Matching Specific Files' hang."
+                )
+                llmlog.error(f"LLM RUN TIMED OUT after {self.timeout}s — killing subprocess tree.")
+                _kill_process_tree(proc)
+                try:
+                    proc.wait(timeout=30)
+                except Exception:
+                    pass
+                return None
+            finally:
+                pump.join(timeout=5)
+
+            rc = proc.returncode
+            if rc == 0:
+                logging.info("LLM subprocess completed successfully.")
+                llmlog.info("LLM RUN FINISHED OK.")
+            else:
+                logging.error(f"LLM subprocess exited with non-zero code {rc}.")
+                llmlog.error(f"LLM RUN FINISHED WITH EXIT CODE {rc}.")
+            return rc
         except Exception as e:
-            logging.error(f"LLM encountered an error during execution: {e}", exc_info=True)
+            logging.error(f"LLM subprocess execution failed: {e}", exc_info=True)
             return None
         finally:
-            # Always revert back to the original working directory
-            if directory and os.path.exists(directory):
-                os.chdir(original_cwd)
-                logging.debug(f"LLM restored directory to: {original_cwd}")
+            try:
+                os.remove(cfg_path)
+            except Exception:
+                pass
 
 
 
