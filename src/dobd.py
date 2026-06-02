@@ -27,6 +27,11 @@ if not os.path.exists(LOGS_DIR):
 
 LOG_FILE = os.path.join(LOGS_DIR, "dobLog.log")
 PREV_LOG_FILE = os.path.join(LOGS_DIR, "dobLogPrev.log")
+# Dedicated log for the polling process (drive scanning loop + GitHub update
+# watcher). Kept separate from dobLog.log so the rest of the bot's logs aren't
+# drowned out by the once-a-second polling chatter.
+POLLING_LOG_FILE = os.path.join(LOGS_DIR, "pollingLog.log")
+POLLING_PREV_LOG_FILE = os.path.join(LOGS_DIR, "pollingLogPrev.log")
 RUN_SEPARATOR = "\n" + "="*50 + " END OF RUN " + "="*50 + "\n"
 
 # --- Completed-drive history (persisted forever) ---
@@ -75,27 +80,38 @@ KEYS_FILE_TEMPLATE = {
     "GITHUB_PAT": ""
 }
 
-# Maintain the past 5 logs in dobLogPrev.log
-if os.path.exists(LOG_FILE):
+def rotate_prev_log(log_file, prev_log_file):
+    """
+    Before a log file is truncated for a new run, fold its last run into the
+    matching *Prev.log file, keeping the 5 most recent runs (separated by
+    RUN_SEPARATOR). Used for both dobLog.log and pollingLog.log.
+    """
+    if not os.path.exists(log_file):
+        return
     try:
-        with open(LOG_FILE, 'r', encoding='utf-8', errors='replace') as f:
+        with open(log_file, 'r', encoding='utf-8', errors='replace') as f:
             last_run_log = f.read().strip()
-            
+
         if last_run_log:
             prev_logs = []
-            if os.path.exists(PREV_LOG_FILE):
-                with open(PREV_LOG_FILE, 'r', encoding='utf-8', errors='replace') as f:
+            if os.path.exists(prev_log_file):
+                with open(prev_log_file, 'r', encoding='utf-8', errors='replace') as f:
                     content = f.read()
                     prev_logs = [log.strip() for log in content.split(RUN_SEPARATOR) if log.strip()]
-            
+
             # Keep the last 4 logs, then add the most recent run
             prev_logs = prev_logs[-4:]
             prev_logs.append(last_run_log)
-            
-            with open(PREV_LOG_FILE, 'w', encoding='utf-8') as f:
+
+            with open(prev_log_file, 'w', encoding='utf-8') as f:
                 f.write(RUN_SEPARATOR.join(prev_logs) + RUN_SEPARATOR)
     except Exception as e:
-        print(f"Failed to update previous logs: {e}")
+        print(f"Failed to update previous logs for {log_file}: {e}")
+
+
+# Maintain the past 5 runs in each *Prev.log before the handlers truncate them.
+rotate_prev_log(LOG_FILE, PREV_LOG_FILE)
+rotate_prev_log(POLLING_LOG_FILE, POLLING_PREV_LOG_FILE)
 
 class LessNoiseFilter(logging.Filter):
     def filter(self, record):
@@ -145,6 +161,21 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[file_handler, stream_handler]
 )
+
+# --- Dedicated polling logger ---
+# Everything from the polling process (the drive-scanning loop and the GitHub
+# update watcher) goes here -> pollingLog.log, and is kept OUT of dobLog.log via
+# propagate=False. The console (stream_handler) still shows it so nothing is
+# hidden during live runs.
+polling_file_handler = logging.FileHandler(POLLING_LOG_FILE, mode='w', encoding='utf-8')
+polling_file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+polling_file_handler.addFilter(noise_filter)
+
+plog = logging.getLogger("dobinator.polling")
+plog.setLevel(logging.DEBUG)
+plog.propagate = False
+plog.addHandler(polling_file_handler)
+plog.addHandler(stream_handler)
 
 STATUS_FILE = os.path.join(PROJECT_ROOT, "srvr", "status.json")
 
@@ -1105,7 +1136,7 @@ class UpdateWatcher:
         try:
             self._check()
         except Exception as e:
-            logging.debug(f"GitHub update check failed (non-fatal): {e}")
+            plog.debug(f"GitHub update check failed (non-fatal): {e}")
         finally:
             with self._lock:
                 self._checking = False
@@ -1126,20 +1157,20 @@ class UpdateWatcher:
                 if self.etag is None:
                     # Establish the baseline; this is the version we run now.
                     self.etag = new_etag
-                    logging.debug(f"GitHub update watcher baseline ETag set: {new_etag}")
+                    plog.debug(f"GitHub update watcher baseline ETag set: {new_etag}")
                 else:
                     # 200 with a previously-known ETag => a genuinely new push.
                     self.etag = new_etag
                     self.update_available = True
                     self.status_mgr.set_update_available(True)
-                    logging.warning("A new version of theDobinator is available on GitHub.")
+                    plog.warning("A new version of theDobinator is available on GitHub.")
         except urllib.error.HTTPError as e:
             if e.code == 304:
-                logging.debug("GitHub update check: 304 Not Modified (up to date).")
+                plog.debug("GitHub update check: 304 Not Modified (up to date).")
             else:
-                logging.warning(f"GitHub update check HTTP error {e.code}: {e.reason}")
+                plog.warning(f"GitHub update check HTTP error {e.code}: {e.reason}")
         except Exception as e:
-            logging.debug(f"GitHub update check network error (non-fatal): {e}")
+            plog.debug(f"GitHub update check network error (non-fatal): {e}")
 
 
 def is_update_scheduled():
@@ -1338,26 +1369,26 @@ def main():
         else:
             logging.info(f"Saved drive {drive} is no longer connected; skipping resume.")
 
-    logging.info("Entering main monitoring loop. Waiting for new drives...")
+    plog.info("Entering main monitoring loop. Waiting for new drives...")
 
     try:
         while True:
-            logging.debug("Polling for currently connected drives...")
+            plog.debug("Polling for currently connected drives...")
             current_drives = get_connected_drives()
-            
+
             # Find newly connected drives (in current but not in known)
             new_drives = current_drives - known_drives
             for drive in new_drives:
-                logging.warning(f"--- NEW DRIVE DETECTED: {drive} ---")
-                logging.debug(f"Adding {drive} to the internal ignore list and queue.")
+                plog.warning(f"--- NEW DRIVE DETECTED: {drive} ---")
+                plog.debug(f"Adding {drive} to the internal ignore list and queue.")
                 known_drives.add(drive)
                 drive_queue.put(drive)
-                
+
             # Find drives that were removed (in known but not in current)
             removed_drives = known_drives - current_drives
             for drive in removed_drives:
-                logging.warning(f"--- DRIVE REMOVED: {drive} ---")
-                logging.debug(f"Removing {drive} from the internal ignore list so it can be re-processed if inserted again.")
+                plog.warning(f"--- DRIVE REMOVED: {drive} ---")
+                plog.debug(f"Removing {drive} from the internal ignore list so it can be re-processed if inserted again.")
                 known_drives.remove(drive)
                     
             # Reset status to 0 if no known drives are connected and queue is empty
@@ -1375,9 +1406,9 @@ def main():
             time.sleep(1)
             
     except KeyboardInterrupt:
-        logging.info("Program stopped by user via KeyboardInterrupt.")
+        plog.info("Program stopped by user via KeyboardInterrupt.")
     except Exception as e:
-        logging.critical(f"An unexpected error occurred in the main loop: {e}", exc_info=True)
+        plog.critical(f"An unexpected error occurred in the main loop: {e}", exc_info=True)
     finally:
         status_mgr.update(running=0)
 
