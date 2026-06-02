@@ -3,9 +3,10 @@ srvr/status.json
 .DS_Store
 srvr/.DS_Store
 .DS_Store
-
-# Secrets — never commit. Holds the GitHub fine-grained PAT used by the update watcher.
-configs/keys.json
 /src/__pycache__
 /srvr/__pycache__
 /local
+
+# Secrets — never commit. Holds the GitHub fine-grained PAT used by the update watcher.
+configs/keys.json
+
