@@ -49,7 +49,9 @@ IIS runs as the built-in `IIS_IUSRS` group. It needs **Read** access to the `srv
 
 ## 3. Set up the companion API (power button)
 
-The portal's power button calls `http://<box-ip>:5050/power`, and that endpoint is served by `srvr_api.py`. We'll run it as a Scheduled Task that starts at boot.
+The portal's power button (and the Update button) call `http://<box-ip>:5050/...`, and those endpoints are served by `srvr_api.py`. We'll run it as a Scheduled Task that starts at logon.
+
+> **Shortcut:** Instead of the manual steps below, you can just run **`configs\api_setup.bat`** once. It self-elevates, opens the firewall for 5050, registers the `Dobinator Web API` scheduled task (auto-start at logon), starts it immediately, and verifies `/health`. The manual steps in 3a–3c remain here for reference/troubleshooting.
 
 ### 3a. Smoke test it manually first
 
