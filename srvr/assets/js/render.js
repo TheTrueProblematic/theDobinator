@@ -205,8 +205,10 @@ export function render(state, prev) {
   // gate below) so the yellow update button appears/disappears immediately.
   const updateBtn = document.getElementById('updateBtn');
   if (updateBtn) {
-    const showUpdate = state.UpdateAvailable === 1 || state.UpdateAvailable === true;
-    updateBtn.classList.toggle('is-visible', !!showUpdate);
+    // Only surface the update button while the Dobinator is actually running.
+    const updateReady = state.UpdateAvailable === 1 || state.UpdateAvailable === true;
+    const showUpdate = state.Running === 1 && updateReady;
+    updateBtn.classList.toggle('is-visible', showUpdate);
   }
 
   const stage = document.getElementById('stage');
