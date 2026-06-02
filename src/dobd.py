@@ -495,6 +495,7 @@ def copy_airport(drive_path, source_zip=AIRPORT_ZIP_SOURCE):
     extracts its contents into a new 'airport' subfolder, then deletes the copied
     zip so that only its extracted contents remain.
     """
+    status_mgr.update(status_number=7)
     logging.info("--- Starting copy_airport Process ---")
 
     # The ARS\data folder is expected to already exist (created by copy_region_files).

@@ -11,6 +11,7 @@ export const STATUS_LABELS = {
   4: 'Matching Specific Files',
   5: 'Copying Specific Files',
   6: 'Issues Detected',
+  7: 'Copying Airport Files',
   10: 'Drive Completed Successfully',
   11: 'Drive Completed — Errors Detected',
 };
@@ -132,6 +133,13 @@ function screenForState(state) {
           <h1 class="headline"><span>${esc(STATUS_LABELS[6])}</span></h1>
           <p class="subline">Creating documentation<span class="dots"><span>.</span><span>.</span><span>.</span></span><br/>
             Hold on while the details get written down. This may take a while.</p>` };
+
+    case 7:
+      return {
+        cardClass: '',
+        inner: spinnerHeadline(STATUS_LABELS[7]) +
+          `<p class="subline">Copying and unzipping the airport data set.</p>`
+      };
 
     case 10:
       return {

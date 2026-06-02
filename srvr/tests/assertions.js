@@ -141,6 +141,19 @@ export const ASSERTIONS = [
   },
 
   {
+    name: 'Running=1, Status=7 shows copying airport files with spinner',
+    state: { Running: 1, StatusNumber: 7 },
+    check(doc) {
+      const r = bodyAttrs(doc, 1, 7); if (!r.passed) return r;
+      if (!$(doc, '.spinner')) return fail('spinner missing');
+      const card = $(doc, '.card');
+      if (!/copying airport files/i.test(card.textContent)) return fail('expected "copying airport files" copy');
+      if (!/unzipping/i.test(card.textContent)) return fail('expected "unzipping" copy');
+      return ok();
+    },
+  },
+
+  {
     name: 'Running=1, Status=10 shows green success card',
     state: { Running: 1, StatusNumber: 10 },
     check(doc) {

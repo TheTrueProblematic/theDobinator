@@ -17,6 +17,7 @@ const STATE_BUTTONS = [
   { sn: 4,  label: '4 · Matching' },
   { sn: 5,  label: '5 · File copy' },
   { sn: 6,  label: '6 · Issues' },
+  { sn: 7,  label: '7 · Airport copy' },
   { sn: 10, label: '10 · Success' },
   { sn: 11, label: '11 · Errors' },
 ];
