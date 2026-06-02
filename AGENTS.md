@@ -27,6 +27,9 @@ This document outlines the core policies, design patterns, and operational knowl
     * `INFO`: Use for standard operational steps, program startup/shutdown, and confirming processing checkpoints.
     * `WARNING`: Use strictly for alerting when physical drive changes occur (a new drive is detected or a drive is removed).
     * `ERROR/CRITICAL`: Use for exceptions, failed folder creations, and stack traces.
+* **Per-Thread / Per-Program Log Separation (going forward):** Every new Python thread, and every new standalone Python file/program added to the project, must write to its **own dedicated log file** in `logs/` (e.g. `logs/<name>.log`) with a matching `logs/<name>Prev.log` that keeps the last 5 runs — the same rule applied to `dobLogPrev.log`. Do **not** funnel a new thread's output into `dobLog.log`; keep each concern in its own file so the main log stays readable.
+    * **Precedent:** The polling process (the drive-scanning loop in `main()` plus the GitHub `UpdateWatcher`) logs to `logs/pollingLog.log` / `logs/pollingLogPrev.log` via a dedicated `logging.getLogger("dobinator.polling")` (referenced as `plog`) configured with `propagate = False` so its records never reach `dobLog.log`. The rest of the bot keeps using the root logger → `dobLog.log`.
+    * **Rotation:** Use the shared `rotate_prev_log(log_file, prev_log_file)` helper for the `*Prev.log` roll-over so every log behaves identically. Apply the same `LessNoiseFilter` to new handlers, and add the shared console `stream_handler` to the new logger so nothing disappears from the live console.
 
 ## 5. Living Document Policy
 * **Knowledge Preservation:** If you discover a "gotcha", a repeated requirement, or a useful piece of project context that would benefit future agents, you must document it here immediately to ensure continuous knowledge preservation.

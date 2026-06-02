@@ -235,14 +235,15 @@ const cloud = [
     [_,_,_,B,B,B,B,B,B,B,B,B,B,_,_,_,_,_,_,_],
 ];
 
-// --- Grass Tuft 8x6 ---
-const grassTuft = [
-    [_,_,_,B,_,_,_,_],
-    [_,_,B,B,B,_,_,_],
-    [_,_,B,B,B,B,_,_],
-    [_,B,B,B,B,B,B,_],
-    [B,B,B,B,B,B,B,B],
-    [B,B,B,B,B,B,B,B],
+// --- Bush 14x7 (rounded, two-humped shrub) ---
+const bush = [
+    [_,_,_,B,B,_,_,_,_,B,B,_,_,_],
+    [_,_,B,B,B,B,_,_,B,B,B,B,_,_],
+    [_,B,B,B,B,B,B,B,B,B,B,B,B,_],
+    [B,B,B,B,B,B,B,B,B,B,B,B,B,B],
+    [B,B,B,B,B,B,B,B,B,B,B,B,B,B],
+    [B,B,B,B,B,B,B,B,B,B,B,B,B,B],
+    [_,B,B,B,B,B,B,B,B,B,B,B,B,_],
 ];
 
 
@@ -255,27 +256,82 @@ const grassTuft = [
 
 let PIXEL_SIZE = 4;
 
+// Active sprite color. Defaults to black; flips to white when the page
+// background is dark (e.g. the Dark Reader extension darkened it), so the
+// scene stays visible instead of rendering black-on-black.
+let spriteColorRGB = '0, 0, 0';
+
+function relativeLuminance(r, g, b) {
+    return 0.299 * r + 0.587 * g + 0.114 * b;
+}
+
 /**
- * Render a sprite data array into an offscreen canvas.
- * @param {string[][]} data  — Pixel array ("0,0,0" = black, "0,0,0,0" = transparent)
+ * Inspect the page's effective background color and decide what color the
+ * sprites should be drawn in. Dark background -> white sprites; light -> black.
+ * This is what lets the scene survive dark-mode browser extensions, which
+ * recolor the CSS background but cannot touch our canvas bitmap.
+ */
+function detectSpriteColor() {
+    try {
+        let bg = getComputedStyle(document.body).backgroundColor || '';
+        let m = bg.match(/rgba?\(([^)]+)\)/);
+        if (m) {
+            const p = m[1].split(',').map(s => parseFloat(s));
+            const a = p.length >= 4 ? p[3] : 1;
+            // A transparent body shows the <html> background instead.
+            if (a === 0) {
+                bg = getComputedStyle(document.documentElement).backgroundColor || '';
+                m = bg.match(/rgba?\(([^)]+)\)/);
+                if (!m) return '0, 0, 0';
+                const hp = m[1].split(',').map(s => parseFloat(s));
+                return relativeLuminance(hp[0], hp[1], hp[2]) < 128 ? '255, 255, 255' : '0, 0, 0';
+            }
+            return relativeLuminance(p[0], p[1], p[2]) < 128 ? '255, 255, 255' : '0, 0, 0';
+        }
+    } catch (e) { /* ignore and fall through */ }
+    return '0, 0, 0';
+}
+
+/**
+ * Re-detect the background color. If the needed sprite color changed, rebuild
+ * every sprite and the scene so entities reference the recolored canvases.
+ * Returns true if a rebuild happened.
+ */
+function refreshSpriteColor() {
+    const c = detectSpriteColor();
+    if (c !== spriteColorRGB) {
+        spriteColorRGB = c;
+        buildSprites();
+        if (sceneCanvas) buildScene();
+        return true;
+    }
+    return false;
+}
+
+/**
+ * Render a sprite data array into an offscreen canvas. The data is treated as
+ * a 1-bit mask: any non-transparent cell is painted in `color` (an "r, g, b"
+ * string), regardless of the cell's original value.
+ * @param {string[][]} data  — Pixel array (opaque = drawn, "0,0,0,0" = transparent)
+ * @param {string} color     — "r, g, b" fill applied to every opaque cell
  * @returns {HTMLCanvasElement}
  */
-function renderSprite(data) {
+function renderSprite(data, color) {
     const rows = data.length;
     const cols = data[0] ? data[0].length : 0;
     const canvas = document.createElement('canvas');
     canvas.width = cols * PIXEL_SIZE;
     canvas.height = rows * PIXEL_SIZE;
     const ctx = canvas.getContext('2d');
+    ctx.fillStyle = `rgb(${color})`;
 
     for (let r = 0; r < rows; r++) {
         for (let c = 0; c < cols; c++) {
             const val = data[r][c];
             if (val && val !== '0, 0, 0, 0') {
-                // Parse RGB values — only draw non-transparent pixels
                 const parts = val.split(',').map(s => parseInt(s.trim(), 10));
-                if (parts.length >= 3 && !(parts.length === 4 && parts[3] === 0)) {
-                    ctx.fillStyle = `rgb(${parts[0]},${parts[1]},${parts[2]})`;
+                const isTransparent = parts.length === 4 && parts[3] === 0;
+                if (!isTransparent) {
                     ctx.fillRect(c * PIXEL_SIZE, r * PIXEL_SIZE, PIXEL_SIZE, PIXEL_SIZE);
                 }
             }
@@ -287,19 +343,20 @@ function renderSprite(data) {
 // Pre-render all sprites — re-runs when PIXEL_SIZE changes (mobile/desktop crossover)
 let SPRITES = {};
 function buildSprites() {
+    const col = spriteColorRGB;
     SPRITES = {
-        catIdle: renderSprite(catIdle),
-        catWalk1: renderSprite(catWalk1),
-        catWalk2: renderSprite(catWalk2),
-        dogIdle: renderSprite(dogIdle),
-        dogWalk1: renderSprite(dogWalk1),
-        dogWalk2: renderSprite(dogWalk2),
-        tree: renderSprite(tree),
-        bench: renderSprite(bench),
-        sun: renderSprite(sun),
-        moon: renderSprite(moon),
-        cloud: renderSprite(cloud),
-        grassTuft: renderSprite(grassTuft),
+        catIdle: renderSprite(catIdle, col),
+        catWalk1: renderSprite(catWalk1, col),
+        catWalk2: renderSprite(catWalk2, col),
+        dogIdle: renderSprite(dogIdle, col),
+        dogWalk1: renderSprite(dogWalk1, col),
+        dogWalk2: renderSprite(dogWalk2, col),
+        tree: renderSprite(tree, col),
+        bench: renderSprite(bench, col),
+        sun: renderSprite(sun, col),
+        moon: renderSprite(moon, col),
+        cloud: renderSprite(cloud, col),
+        bush: renderSprite(bush, col),
     };
 }
 buildSprites();
@@ -469,11 +526,14 @@ function getTimeOfDayState() {
     return hour >= 21 || hour < 6;
 }
 
-function getSunYRatio() {
+function getSkyBodyYRatio() {
     const hour = new Date().getHours() + new Date().getMinutes() / 60;
-    if (hour < 6 || hour > 18) return 0.7;
+    // Night: park the moon high in the sky (the old code dropped it onto the
+    // horizon, where it looked broken). Day: a gentle arc that stays well
+    // above the ground — the sun used to sit too low at dawn/dusk.
+    if (hour < 6 || hour > 18) return 0.18;
     const t = (hour - 6) / 12;
-    return 0.65 - 0.55 * Math.sin(t * Math.PI);
+    return 0.32 - 0.20 * Math.sin(t * Math.PI);
 }
 
 function buildScene() {
@@ -483,50 +543,61 @@ function buildScene() {
     groundY = Math.floor(sceneHeight * CONFIG.groundYRatio);
     isNight = getTimeOfDayState();
 
+    const edge = Math.max(16, Math.floor(sceneWidth * 0.03));
+    const usable = sceneWidth - edge * 2;
+
     // --- Sun or Moon ---
-    const sunY = Math.floor(sceneHeight * getSunYRatio());
+    const skyY = Math.floor(sceneHeight * getSkyBodyYRatio());
     const skyBody = isNight ? SPRITES.moon : SPRITES.sun;
     if (skyBody) {
-        entities.push(new StaticEntity(skyBody, Math.floor(sceneWidth * 0.75), sunY));
+        entities.push(new StaticEntity(skyBody, Math.floor(sceneWidth * 0.78), skyY));
     }
 
-    // --- Clouds ---
+    // --- Clouds (sparse, kept in the upper sky) ---
     if (SPRITES.cloud) {
-        const cloudCount = Math.max(2, Math.floor(sceneWidth / 300));
+        const cloudCount = Math.min(4, Math.max(1, Math.round(sceneWidth / 480)));
         for (let i = 0; i < cloudCount; i++) {
-            const cx = (sceneWidth / (cloudCount + 1)) * (i + 1) + (Math.random() * 60 - 30);
-            const cy = 15 + Math.random() * (groundY * 0.25);
-            const speed = (0.003 + Math.random() * 0.008) * (Math.random() < 0.5 ? 1 : -1);
+            const cx = (sceneWidth / (cloudCount + 1)) * (i + 1) + (Math.random() * 50 - 25);
+            const cy = 12 + Math.random() * (groundY * 0.18);
+            const speed = (0.003 + Math.random() * 0.007) * (Math.random() < 0.5 ? 1 : -1);
             entities.push(new CloudEntity(SPRITES.cloud, cx, cy, speed));
         }
     }
 
-    // --- Trees ---
-    if (SPRITES.tree) {
-        const treeCount = Math.max(2, Math.floor(sceneWidth / 250));
-        for (let i = 0; i < treeCount; i++) {
-            const tx = 30 + ((sceneWidth - 60) / (treeCount + 1)) * (i + 1) + (Math.random() * 40 - 20);
-            entities.push(new StaticEntity(SPRITES.tree, tx, groundY - SPRITES.tree.height));
+    // --- Trees + Bench share evenly spaced ground slots so they never overlap ---
+    const treeCount = Math.min(4, Math.max(1, Math.round(sceneWidth / 440)));
+    const hasBench = !!SPRITES.bench;
+    const bigCount = treeCount + (hasBench ? 1 : 0);
+    if (bigCount > 0) {
+        const slotW = usable / bigCount;
+        const benchSlot = hasBench ? Math.floor(bigCount / 2) : -1;
+        for (let s = 0; s < bigCount; s++) {
+            const center = edge + slotW * (s + 0.5);
+            const jitter = (Math.random() * 0.24 - 0.12) * slotW;
+            if (s === benchSlot) {
+                const bx = Math.round(center - SPRITES.bench.width / 2 + jitter);
+                entities.push(new StaticEntity(SPRITES.bench, bx, groundY - SPRITES.bench.height));
+            } else if (SPRITES.tree) {
+                const tx = Math.round(center - SPRITES.tree.width / 2 + jitter);
+                entities.push(new StaticEntity(SPRITES.tree, tx, groundY - SPRITES.tree.height));
+            }
         }
     }
 
-    // --- Bench ---
-    if (SPRITES.bench) {
-        const bx = Math.floor(sceneWidth * 0.45);
-        entities.push(new StaticEntity(SPRITES.bench, bx, groundY - SPRITES.bench.height));
-    }
-
-    // --- Grass tufts ---
-    if (SPRITES.grassTuft) {
-        const tuftCount = Math.max(4, Math.floor(sceneWidth / 100));
-        for (let i = 0; i < tuftCount; i++) {
-            const gx = Math.random() * (sceneWidth - SPRITES.grassTuft.width);
-            entities.push(new StaticEntity(SPRITES.grassTuft, gx, groundY - SPRITES.grassTuft.height));
+    // --- Bushes (few, evenly spaced, interleaved between the big objects) ---
+    if (SPRITES.bush) {
+        const bushCount = Math.min(5, Math.max(1, Math.round(sceneWidth / 360)));
+        const span = usable / (bushCount + 1);
+        for (let i = 0; i < bushCount; i++) {
+            const center = edge + span * (i + 1);
+            const jitter = (Math.random() * 0.3 - 0.15) * span;
+            const gx = Math.round(center - SPRITES.bush.width / 2 + jitter);
+            entities.push(new StaticEntity(SPRITES.bush, gx, groundY - SPRITES.bush.height));
         }
     }
 
-    // --- Pets ---
-    const petCount = Math.min(5, Math.max(3, Math.floor(sceneWidth / 400) + 1));
+    // --- Pets (spread out initially; they wander afterwards) ---
+    const petCount = Math.min(5, Math.max(2, Math.round(sceneWidth / 480)));
     for (let i = 0; i < petCount; i++) {
         const isCat = i % 2 === 0;
         const sprites = isCat
@@ -534,8 +605,9 @@ function buildScene() {
             : { idle: SPRITES.dogIdle, walk1: SPRITES.dogWalk1, walk2: SPRITES.dogWalk2 };
 
         if (sprites.idle) {
-            const px = 40 + Math.random() * (sceneWidth - 80 - (sprites.idle.width || 64));
-            const pet = new PetEntity(sprites, px, groundY - (sprites.idle.height || 64), isCat ? 'cat' : 'dog');
+            const base = edge + (usable / (petCount + 1)) * (i + 1);
+            const px = Math.round(base - sprites.idle.width / 2 + (Math.random() * 28 - 14));
+            const pet = new PetEntity(sprites, px, groundY - sprites.idle.height, isCat ? 'cat' : 'dog');
             if (i % 3 === 0) {
                 pet.state = 'walking';
                 pet.direction = Math.random() < 0.5 ? -1 : 1;
@@ -547,9 +619,10 @@ function buildScene() {
 }
 
 function drawGround(ctx) {
-    ctx.fillStyle = '#000000';
+    const isWhite = spriteColorRGB.trim().startsWith('255');
+    ctx.fillStyle = `rgb(${spriteColorRGB})`;
     ctx.fillRect(0, groundY, sceneWidth, 2);
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.03)';
+    ctx.fillStyle = isWhite ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.03)';
     ctx.fillRect(0, groundY + 2, sceneWidth, sceneHeight - groundY - 2);
 }
 
@@ -561,6 +634,12 @@ function gameLoop(timestamp) {
     const dt = lastTime ? (timestamp - lastTime) : 16;
     lastTime = timestamp;
     frameCounter++;
+
+    // Re-check the page background a couple of times a second so the scene
+    // adapts when a dark-mode extension turns on/off after load.
+    if (frameCounter % 30 === 0) {
+        refreshSpriteColor();
+    }
 
     if (frameCounter % 3600 === 0) {
         const wasNight = isNight;
@@ -607,6 +686,11 @@ export function initScene() {
     sceneCanvas.dataset.active = 'true';
     container.appendChild(sceneCanvas);
     sceneCtx = sceneCanvas.getContext('2d');
+
+    // Pick the sprite color for the current background (handles Dark Reader)
+    // before the first paint, then build sprites in that color.
+    spriteColorRGB = detectSpriteColor();
+    buildSprites();
 
     resizeScene();
     buildScene();

@@ -168,6 +168,34 @@ html, body {
 .power-btn.is-busy { pointer-events: none; opacity: .7; }
 .power-btn.is-busy svg { animation: spin 1s linear infinite; }
 
+/* ---------- Power button run-state ----------
+   The run state must be legible from the button ALONE, because a dark-mode
+   browser extension (e.g. Dark Reader) can override the page background and
+   defeat the light/dark theme cue. Running = solid green "on"; Stopped =
+   hollow outline. Fill-vs-outline + hue both survive extension recoloring. */
+body[data-running="1"] .power-btn {
+  border-color: var(--success);
+  background: var(--success);
+  color: #ffffff;
+  animation: powerOnPulse 3.2s ease-in-out infinite;
+}
+body[data-running="1"] .power-btn:hover {
+  background: color-mix(in srgb, var(--success) 82%, #000);
+  border-color: color-mix(in srgb, var(--success) 82%, #000);
+  color: #ffffff;
+}
+
+body[data-running="0"] .power-btn {
+  border-color: var(--fg);
+  background: transparent;
+  color: var(--fg);
+}
+
+@keyframes powerOnPulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--success) 45%, transparent); }
+  50%      { box-shadow: 0 0 0 7px color-mix(in srgb, var(--success) 0%, transparent); }
+}
+
 /* ---------- OFF state (Running = 0) ---------- */
 
 .off-screen {
