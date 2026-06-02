@@ -8,3 +8,4 @@ srvr/.DS_Store
 configs/keys.json
 /src/__pycache__
 /srvr/__pycache__
+/local
