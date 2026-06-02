@@ -599,7 +599,92 @@ def matchFiles(drive_path):
     )
     logging.info(f"Sending prompt to LLM in matchFiles: '{prompt}'")
     match_llm.use(prompt)
-    
+
+    # ========================================================================
+    # SECOND PASS: VERIFICATION LLM
+    # ========================================================================
+    # Spin up a fresh LLM instance (no shared conversation history) in the root
+    # of the drive to double-check the mapping.csv produced above and fix any
+    # files the first agent missed. Declared with the full constructor signature
+    # (model spelled out explicitly so it is easy to swap later) and given a
+    # larger 100000 context window so it can reason over packfiles.txt and the
+    # full mapping.csv at once.
+    verify_llm = LLM(
+        ip_address="192.168.11.65",
+        port=1234,
+        working_directory=drive_path,
+        model="openai/qwen/qwen3.6-27b",
+        context_window=100000,
+        api_key="fake_key",
+        max_tokens=4096
+    )
+
+    verify_prompt = (
+        "An AI agent, much like you, was just run on this drive with this as its prompt and goal:\n\n"
+        "-------------------- PREVIOUS AGENT'S PROMPT --------------------\n"
+        f"{prompt}\n"
+        "-----------------------------------------------------------------\n\n"
+        "It supposedly completed this goal and everything should be in the csv it created "
+        "(dobDir\\mapping.csv), but I am skeptical that it got all of the files. For example, "
+        "just the other day I ran it on a packfile that contained these files in imagery:\n\n"
+        "data\\imagery\\BlueMarble.esp\n"
+        "data\\imagery\\HYP_HR_SR_W_DR.esp\n"
+        "data\\imagery\\terrain_Global_SRTM3_90M.esp\n"
+        "data\\imagery\\terrain_usa-nm_2007-2022_1m-10m.esp\n"
+        "data\\imagery\\terrain_usa_conus_2024_10m.esp\n"
+        "data\\imagery\\usa-az_naip_small_2023_31cm.esp\n"
+        "data\\imagery\\usa-co_naip_small_2023_31cm.esp\n"
+        "data\\imagery\\usa-nm-bernalillocounty_2021_15cm.esp\n"
+        "data\\imagery\\usa-nm_2022_61cm.esp\n"
+        "data\\imagery\\usa-ok_naip_small_2023_31cm.esp\n"
+        "data\\imagery\\usa-tx_naip_small_2023_61cm.esp\n"
+        "data\\imagery\\usa-ut_naip_small_2023_61cm.esp\n"
+        "data\\imagery\\usa_faa_ifr_enr_gom_vertical_flight_ref_2025-04-17_37m.esp\n"
+        "data\\imagery\\usa_faa_ifr_enr_high_2025-04-17_143m.esp\n"
+        "data\\imagery\\usa_faa_ifr_enr_hi_pacific_2025-04-17_442m.esp\n"
+        "data\\imagery\\usa_faa_ifr_enr_low_area_2025-04-17_92m.esp\n"
+        "data\\imagery\\usa_faa_vfr_caribbean_2025-04-17_86m.esp\n"
+        "data\\imagery\\usa_faa_vfr_flyways_2025-04-17_21m.esp\n"
+        "data\\imagery\\usa_faa_vfr_grand_canyon_2025-04-17_21m.esp\n"
+        "data\\imagery\\usa_faa_vfr_heli_2025-04-17_14m.esp\n"
+        "data\\imagery\\usa_faa_vfr_sectionals_2025-04-17_47m.esp\n"
+        "data\\imagery\\usa_faa_vfr_tac_2025-04-17_21m.esp\n"
+        "data\\imagery\\usgs_drg.esp\n\n"
+        "But after it completed, I ran ls on the imagery folder and saw only these files in it:\n\n"
+        "Mode                 LastWriteTime         Length Name\n"
+        "----                 -------------         ------ ----\n"
+        "------         11/8/2019   4:37 PM      282272404 BlueMarble.esp\n"
+        "------         11/8/2019   4:38 PM      282272416 HYP_HR_SR_W_DR.esp\n"
+        "------         8/12/2021   3:44 PM    17080963648 terrain_Global_SRTM3_90M.esp\n"
+        "------         2/19/2024   4:29 PM    67152599684 terrain_usa_conus_2024_10m.esp\n"
+        "-a----         5/29/2026  11:18 AM      438251640 usa_faa_ifr_enr_high_2026-06-11_143m.esp\n"
+        "-a----         5/29/2026  11:20 AM       54557972 usa_faa_ifr_enr_hi_pacific_2026-06-11_442m.esp\n"
+        "-a----         5/29/2026  11:09 AM     1110090000 usa_faa_ifr_enr_low_area_2026-06-11_92m.esp\n"
+        "-a----         5/25/2026  10:52 AM       57525852 usa_faa_vfr_caribbean_2026-06-11_86m.esp\n"
+        "-a----         5/25/2026  10:30 AM      200103400 usa_faa_vfr_flyways_2026-06-11_21m.esp\n"
+        "-a----         5/25/2026  10:52 AM       19531628 usa_faa_vfr_grand_canyon_2026-06-11_21m.esp\n"
+        "-a----         5/25/2026  10:52 AM      279645984 usa_faa_vfr_heli_2026-06-11_14m.esp\n"
+        "-a----         5/25/2026  10:48 AM     3173666076 usa_faa_vfr_sectionals_2026-06-11_47m.esp\n"
+        "-a----         5/25/2026  10:29 AM      627613088 usa_faa_vfr_tac_2026-06-11_21m.esp\n"
+        "------         9/30/2022   3:43 PM   156704702732 usgs_drg.esp\n\n"
+        "With several obviously and notably missing. For example "
+        "data\\imagery\\usa-nm_2022_61cm.esp is not on the drive. This file should have been added "
+        "to the csv, with its pairing in U drive actually found at "
+        "U:\\ARS\\Data\\imagery\\usa\\usa-nm_naip_2024_30cm.esp (note the different name). Another "
+        "example of this is the file data\\imagery\\usa-nm-bernalillocounty_2021_15cm.esp which "
+        "should have had its pairing matched from U drive as "
+        "U:\\ARS\\Data\\imagery\\usa\\usa-nm-bernalillocounty_2021_15cm.esp (note despite the same "
+        "name how it still wasn't added to the CSV).\n\n"
+        "Given all of this, your task is to slowly, carefully, with extreme precision find any "
+        "errors that the initial agent could have caused and correct them. Read the initial prompt "
+        "carefully so you don't make any errors. You can start by just looking at packfiles.txt and "
+        "the mapping.csv that the previous agent made and making sure that everything from packfile "
+        "is in the csv. Try as hard as you can to get this perfect. It matters a lot to me that you "
+        "do this right and you have to nail it! PLEASE!!!"
+    )
+    logging.info(f"Sending verification prompt to second LLM in matchFiles: '{verify_prompt}'")
+    verify_llm.use(verify_prompt)
+
     logging.info("--- Finished matchFiles Process ---")
 
 def mainCopy(drive_path):
