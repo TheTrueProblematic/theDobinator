@@ -201,6 +201,14 @@ export function render(state, prev) {
   document.body.dataset.running = String(state.Running);
   document.body.dataset.status = String(state.StatusNumber);
 
+  // Reflect update availability on every render (independent of the change
+  // gate below) so the yellow update button appears/disappears immediately.
+  const updateBtn = document.getElementById('updateBtn');
+  if (updateBtn) {
+    const showUpdate = state.UpdateAvailable === 1 || state.UpdateAvailable === true;
+    updateBtn.classList.toggle('is-visible', !!showUpdate);
+  }
+
   const stage = document.getElementById('stage');
   if (!stage) return false;
 
@@ -265,28 +273,41 @@ function updateProgressInPlace(stage, state) {
   if (p) p.textContent = `${pct}%`;
 }
 
+function formatTimestamp(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleString([], {
+    month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+  });
+}
+
 function renderHistory(completedDrives = []) {
   const list = document.getElementById('historyList');
   if (!list) return;
-  
-  if (completedDrives.length === 0) {
-    list.innerHTML = `<div class="subline" style="text-align: center; margin-top: 0;">No drives processed yet.</div>`;
+
+  if (!completedDrives || completedDrives.length === 0) {
+    list.innerHTML = `<div class="subline" style="text-align: center; margin-top: 0;">No drives completed in the last 24 hours.</div>`;
     return;
   }
-  
+
   // Reverse the array to show most recent at the top
   const drives = [...completedDrives].reverse();
-  
+
   list.innerHTML = drives.map(drive => {
     const isWarning = drive.issues;
     const itemClass = isWarning ? 'is-warning' : 'is-success';
     const icon = isWarning ? ICONS.warn : ICONS.check;
-    const text = isWarning ? `${esc(drive.name)} Experienced Issues` : `${esc(drive.name)} Completed`;
-    
+    const label = isWarning ? `${esc(drive.name)} Experienced Issues` : `${esc(drive.name)} Completed`;
+    const when = formatTimestamp(drive.timestamp);
+
     return `
       <div class="history-item ${itemClass}">
         <div class="history-item-icon">${icon}</div>
-        <div class="history-item-text">${text}</div>
+        <div class="history-item-body">
+          <div class="history-item-text">${label}</div>
+          ${when ? `<div class="history-item-time">${esc(when)}</div>` : ''}
+        </div>
       </div>
     `;
   }).join('');

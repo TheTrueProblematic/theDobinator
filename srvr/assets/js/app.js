@@ -1,7 +1,7 @@
 // Top-level controller: polls status.json, hands off to render.js,
 // wires up the power button (which calls the companion API and re-polls fast).
 
-import { fetchStatus, togglePower } from './api.js';
+import { fetchStatus, togglePower, applyUpdate, scheduleUpdate } from './api.js';
 import { render } from './render.js';
 
 const POLL_INTERVAL_MS = 1000;
@@ -13,6 +13,7 @@ let pollHandle = null;
 let fastPollHandle = null;
 let fastPollUntil = 0;
 let powerInFlight = false;
+let updateInFlight = false;
 
 async function poll() {
   const state = await fetchStatus();
@@ -60,6 +61,57 @@ async function handlePowerClick() {
   }
 }
 
+// A drive is actively being worked when the program is running and the status
+// is one of the in-progress steps (1–7). Idle/finished states (0, 10, 11) mean
+// nothing is processing, so an update can be applied right away.
+function isProcessing() {
+  const s = lastState;
+  return !!(s && s.Running === 1 && s.StatusNumber >= 1 && s.StatusNumber <= 7);
+}
+
+function closeUpdateModal() {
+  document.getElementById('updateModal')?.classList.add('hidden');
+}
+
+async function handleUpdateClick() {
+  if (isProcessing()) {
+    // Can't update mid-process — offer to schedule it for when the drive is done.
+    document.getElementById('updateModal')?.classList.remove('hidden');
+    return;
+  }
+  // Idle: apply the update immediately.
+  if (updateInFlight) return;
+  updateInFlight = true;
+  try {
+    await applyUpdate();
+  } catch (err) {
+    console.error('[Dobinator] apply update failed:', err);
+    alert(
+      'Could not start the update.\n\n' +
+      'Check that the companion API (srvr_api.py) is running on port 5050.'
+    );
+  } finally {
+    setTimeout(() => { updateInFlight = false; }, 800);
+  }
+}
+
+async function handleScheduleUpdate() {
+  if (updateInFlight) return;
+  updateInFlight = true;
+  try {
+    await scheduleUpdate();
+    closeUpdateModal();
+  } catch (err) {
+    console.error('[Dobinator] schedule update failed:', err);
+    alert(
+      'Could not schedule the update.\n\n' +
+      'Check that the companion API (srvr_api.py) is running on port 5050.'
+    );
+  } finally {
+    setTimeout(() => { updateInFlight = false; }, 800);
+  }
+}
+
 function wireDelegatedEvents() {
   document.addEventListener('click', (e) => {
     const btn = e.target.closest('#powerBtn');
@@ -74,10 +126,25 @@ function wireDelegatedEvents() {
     if (closeBtn) {
       document.getElementById('historyModal')?.classList.add('hidden');
     }
-    
+
     const backdrop = e.target.closest('#modalBackdrop');
     if (backdrop) {
       document.getElementById('historyModal')?.classList.add('hidden');
+    }
+
+    // --- Update flow ---
+    const updateBtn = e.target.closest('#updateBtn');
+    if (updateBtn) handleUpdateClick();
+
+    const scheduleBtn = e.target.closest('#scheduleUpdateBtn');
+    if (scheduleBtn) handleScheduleUpdate();
+
+    if (
+      e.target.closest('#cancelUpdateBtn') ||
+      e.target.closest('#closeUpdateBtn') ||
+      e.target.closest('#updateModalBackdrop')
+    ) {
+      closeUpdateModal();
     }
   });
 }

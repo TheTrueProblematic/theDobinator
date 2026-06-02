@@ -11,6 +11,8 @@ const DEFAULT_STATE = Object.freeze({
   CompletedBaseFiles: -1,
   TotalMainFiles: -1,
   CompletedMainFiles: -1,
+  CompletedDrives: [],
+  UpdateAvailable: 0,
 });
 
 export const ERROR_STATE = Object.freeze({
@@ -20,6 +22,8 @@ export const ERROR_STATE = Object.freeze({
   CompletedBaseFiles: -1,
   TotalMainFiles: -1,
   CompletedMainFiles: -1,
+  CompletedDrives: [],
+  UpdateAvailable: 0,
   _error: true,
 });
 
@@ -48,13 +52,27 @@ export async function fetchStatus() {
 }
 
 export async function togglePower() {
-  const url = `${window.location.protocol}//${window.location.hostname}:${API_PORT}/power`;
+  return postToApi('/power');
+}
+
+// Apply an available update immediately (only valid when no drive is processing).
+export async function applyUpdate() {
+  return postToApi('/update');
+}
+
+// Schedule an available update to be applied once the current drive finishes.
+export async function scheduleUpdate() {
+  return postToApi('/schedule-update');
+}
+
+async function postToApi(path) {
+  const url = `${window.location.protocol}//${window.location.hostname}:${API_PORT}${path}`;
   const res = await fetch(url, {
     method: 'POST',
     mode: 'cors',
     headers: { 'Content-Type': 'application/json' },
     body: '{}',
   });
-  if (!res.ok) throw new Error(`Power endpoint returned HTTP ${res.status}`);
+  if (!res.ok) throw new Error(`${path} endpoint returned HTTP ${res.status}`);
   return res.json().catch(() => ({ ok: true }));
 }

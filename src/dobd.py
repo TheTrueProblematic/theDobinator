@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import ctypes
 import string
@@ -10,6 +11,9 @@ import json
 import threading
 import queue
 import zipfile
+import datetime
+import urllib.request
+import urllib.error
 
 # --- Logging Setup ---
 # Find the project root by going up one level from the 'src' directory
@@ -24,6 +28,52 @@ if not os.path.exists(LOGS_DIR):
 LOG_FILE = os.path.join(LOGS_DIR, "dobLog.log")
 PREV_LOG_FILE = os.path.join(LOGS_DIR, "dobLogPrev.log")
 RUN_SEPARATOR = "\n" + "="*50 + " END OF RUN " + "="*50 + "\n"
+
+# --- Completed-drive history (persisted forever) ---
+# Every completed drive is appended here as "ISO-timestamp,name,issues" and
+# kept indefinitely. The WebUI only surfaces the last 24 hours (see
+# StatusManager._load_recent_completed_drives), but the full record lives here.
+COMPLETED_DRIVES_CSV = os.path.join(LOGS_DIR, "completedDrives.csv")
+
+# --- Update / queue-resume coordination files ---
+# update_scheduled.flag is written by the companion API (srvr_api.py) when the
+# user asks to apply an update once the current drive finishes. drive_queue.json
+# holds the drives still waiting to be processed so they survive the program
+# restart that an update triggers.
+UPDATE_SCHEDULED_FLAG = os.path.join(LOGS_DIR, "update_scheduled.flag")
+SAVED_QUEUE_FILE = os.path.join(LOGS_DIR, "drive_queue.json")
+
+# --- GitHub update watcher configuration ---
+# Used purely to poll for new commits via cheap HTTP conditional (ETag)
+# requests so we can light up the "update available" indicator in the WebUI
+# without burning the rate limit.
+GITHUB_REPO = "TheTrueProblematic/theDobinator"
+GITHUB_BRANCH = "main"
+GITHUB_API_URL = (
+    f"https://api.github.com/repos/{GITHUB_REPO}/commits"
+    f"?sha={GITHUB_BRANCH}&per_page=1"
+)
+# How many 1-second drive-poll iterations between GitHub checks (~5 seconds).
+GITHUB_CHECK_EVERY = 5
+
+# --- Secrets / keys file ---
+# The GitHub fine-grained PAT is deliberately NOT stored in source (it would
+# leak the moment the repo is pushed). It lives in configs/keys.json, which is
+# gitignored. That file is auto-created with a blank key slot on first run, and
+# the program refuses to run until the key has been filled in.
+CONFIGS_DIR = os.path.join(PROJECT_ROOT, "configs")
+KEYS_FILE = os.path.join(CONFIGS_DIR, "keys.json")
+GITLOG_FILE = os.path.join(LOGS_DIR, "gitLog.log")
+GITHUB_PAT_LABEL = "GITHUB_PAT"
+KEYS_FILE_TEMPLATE = {
+    "_README": (
+        "The Dobinator secrets file. NEVER commit this file (it is gitignored). "
+        "Paste your GitHub fine-grained Personal Access Token (scoped to "
+        "Contents: Read on TheTrueProblematic/theDobinator) between the quotes "
+        "for GITHUB_PAT below. The Dobinator will not run until this is filled in."
+    ),
+    "GITHUB_PAT": ""
+}
 
 # Maintain the past 5 logs in dobLogPrev.log
 if os.path.exists(LOG_FILE):
@@ -112,6 +162,7 @@ class StatusManager:
             "TotalMainFiles": -1,
             "CompletedMainFiles": -1,
             "CompletedDrives": [],
+            "UpdateAvailable": 0,
             "Running": 1
         }
         if os.path.exists(self.filepath):
@@ -149,12 +200,66 @@ class StatusManager:
         
         self._write_data(data)
 
-    def add_completed_drive(self, name, had_issues):
+    def set_update_available(self, available):
+        """Flip the WebUI 'update available' indicator on or off."""
         data = self._read_data()
-        drives = data.get("CompletedDrives", [])
-        drives.append({"name": name, "issues": had_issues})
-        data["CompletedDrives"] = drives
+        new_val = 1 if available else 0
+        if data.get("UpdateAvailable", 0) != new_val:
+            data["UpdateAvailable"] = new_val
+            self._write_data(data)
+
+    def _load_recent_completed_drives(self, hours=24):
+        """
+        Read the permanent completedDrives.csv and return the entries that
+        completed within the last `hours` hours, newest last. Each entry is a
+        dict {name, issues, timestamp} matching what the WebUI consumes.
+        """
+        recent = []
+        if not os.path.exists(COMPLETED_DRIVES_CSV):
+            return recent
+        cutoff = datetime.datetime.now() - datetime.timedelta(hours=hours)
+        try:
+            with open(COMPLETED_DRIVES_CSV, mode='r', newline='', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                for row in reader:
+                    if len(row) < 2:
+                        continue
+                    ts_str, name = row[0].strip(), row[1]
+                    issues = False
+                    if len(row) >= 3:
+                        issues = row[2].strip().lower() in ("1", "true", "yes")
+                    try:
+                        ts = datetime.datetime.fromisoformat(ts_str)
+                    except ValueError:
+                        continue
+                    if ts >= cutoff:
+                        recent.append({"name": name, "issues": issues, "timestamp": ts_str})
+        except Exception as e:
+            logging.error(f"Failed to read {COMPLETED_DRIVES_CSV}: {e}")
+        return recent
+
+    def refresh_completed_drives(self):
+        """Recompute the last-24h completed-drive list and store it in status.json."""
+        recent = self._load_recent_completed_drives()
+        data = self._read_data()
+        data["CompletedDrives"] = recent
         self._write_data(data)
+
+    def add_completed_drive(self, name, had_issues):
+        """
+        Permanently record a completed drive in completedDrives.csv (kept
+        forever) and refresh the last-24h view exposed to the WebUI.
+        """
+        ts = datetime.datetime.now().isoformat(timespec="seconds")
+        try:
+            os.makedirs(os.path.dirname(COMPLETED_DRIVES_CSV), exist_ok=True)
+            with open(COMPLETED_DRIVES_CSV, mode='a', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow([ts, name, "1" if had_issues else "0"])
+            logging.info(f"Recorded completed drive '{name}' (issues={bool(had_issues)}) at {ts}")
+        except Exception as e:
+            logging.error(f"Failed to append to {COMPLETED_DRIVES_CSV}: {e}")
+        self.refresh_completed_drives()
 
 status_mgr = StatusManager(STATUS_FILE)
 
@@ -600,6 +705,8 @@ def matchFiles(drive_path):
     logging.info(f"Sending prompt to LLM in matchFiles: '{prompt}'")
     match_llm.use(prompt)
 
+    logging.info("--- Finished FIRST pass of matchFiles Process ---")
+
     # ========================================================================
     # SECOND PASS: VERIFICATION LLM
     # ========================================================================
@@ -913,6 +1020,224 @@ def process_drive(drive_path):
     return issues_found
 
 
+def _append_gitlog(message):
+    """Append a timestamped line to the user-facing gitLog.log."""
+    try:
+        os.makedirs(LOGS_DIR, exist_ok=True)
+        ts = datetime.datetime.now().strftime("%a %m/%d/%Y %H:%M:%S")
+        with open(GITLOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{ts} - {message}\n")
+    except Exception as e:
+        logging.error(f"Failed to write {GITLOG_FILE}: {e}")
+
+
+def ensure_keys_file():
+    """Create configs/keys.json with a blank key slot if it does not already exist."""
+    if os.path.exists(KEYS_FILE):
+        return
+    try:
+        os.makedirs(CONFIGS_DIR, exist_ok=True)
+        with open(KEYS_FILE, "w", encoding="utf-8") as f:
+            json.dump(KEYS_FILE_TEMPLATE, f, indent=4)
+        logging.info(
+            f"Created blank keys file at {KEYS_FILE}. "
+            f"Fill in '{GITHUB_PAT_LABEL}' before running."
+        )
+    except Exception as e:
+        logging.error(f"Failed to create keys file {KEYS_FILE}: {e}")
+
+
+def get_github_pat():
+    """
+    Ensure the keys file exists, then return the GitHub PAT it holds. Returns an
+    empty string if the file is missing, unreadable, or the key slot is blank.
+    """
+    ensure_keys_file()
+    try:
+        with open(KEYS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return str(data.get(GITHUB_PAT_LABEL, "")).strip()
+    except Exception as e:
+        logging.error(f"Failed to read keys file {KEYS_FILE}: {e}")
+        return ""
+
+
+class UpdateWatcher:
+    """
+    Polls GitHub for new commits using cheap HTTP conditional requests so the
+    WebUI can show an "update available" indicator without burning the API
+    rate limit.
+
+    Approach (matches the rate-limit-free local watcher pattern):
+      * First request has no validator -> GitHub returns 200 + an ETag. We
+        store that ETag as our baseline and do NOT flag an update (this is
+        simply the version we are already running).
+      * Every later request sends the stored ETag back in If-None-Match.
+          - 304 Not Modified  -> nothing changed, costs nothing.
+          - 200 OK            -> a new push happened. We refresh the stored
+                                 ETag and raise the update-available flag.
+
+    The actual HTTP call runs on a short-lived daemon thread so a slow network
+    never stalls the 1-second drive-detection loop.
+    """
+
+    def __init__(self, status_mgr, github_pat):
+        self.status_mgr = status_mgr
+        self.github_pat = github_pat
+        self.etag = None
+        self.update_available = False
+        self._lock = threading.Lock()
+        self._checking = False
+
+    def trigger_check(self):
+        """Kick off a non-blocking GitHub check (no-op if one is already running)."""
+        if self.update_available:
+            # Once we know an update is waiting there is nothing more to learn
+            # until the program restarts and re-baselines.
+            return
+        with self._lock:
+            if self._checking:
+                return
+            self._checking = True
+        threading.Thread(target=self._run_check, daemon=True).start()
+
+    def _run_check(self):
+        try:
+            self._check()
+        except Exception as e:
+            logging.debug(f"GitHub update check failed (non-fatal): {e}")
+        finally:
+            with self._lock:
+                self._checking = False
+
+    def _check(self):
+        req = urllib.request.Request(GITHUB_API_URL)
+        req.add_header("Authorization", f"Bearer {self.github_pat}")
+        req.add_header("Accept", "application/vnd.github+json")
+        req.add_header("X-GitHub-Api-Version", "2022-11-28")
+        req.add_header("User-Agent", "TheDobinator-UpdateWatcher")
+        if self.etag:
+            req.add_header("If-None-Match", self.etag)
+
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                new_etag = resp.headers.get("ETag")
+                resp.read()  # drain the body so the connection can be reused/closed
+                if self.etag is None:
+                    # Establish the baseline; this is the version we run now.
+                    self.etag = new_etag
+                    logging.debug(f"GitHub update watcher baseline ETag set: {new_etag}")
+                else:
+                    # 200 with a previously-known ETag => a genuinely new push.
+                    self.etag = new_etag
+                    self.update_available = True
+                    self.status_mgr.set_update_available(True)
+                    logging.warning("A new version of theDobinator is available on GitHub.")
+        except urllib.error.HTTPError as e:
+            if e.code == 304:
+                logging.debug("GitHub update check: 304 Not Modified (up to date).")
+            else:
+                logging.warning(f"GitHub update check HTTP error {e.code}: {e.reason}")
+        except Exception as e:
+            logging.debug(f"GitHub update check network error (non-fatal): {e}")
+
+
+def is_update_scheduled():
+    """True if the user asked (via the WebUI) to apply an update after the current drive."""
+    return os.path.exists(UPDATE_SCHEDULED_FLAG)
+
+
+def clear_update_scheduled():
+    """Remove the scheduled-update flag if present."""
+    try:
+        if os.path.exists(UPDATE_SCHEDULED_FLAG):
+            os.remove(UPDATE_SCHEDULED_FLAG)
+    except Exception as e:
+        logging.error(f"Failed to clear scheduled-update flag: {e}")
+
+
+def drain_queue(drive_queue):
+    """Pull every remaining item out of the queue (without processing them)."""
+    items = []
+    while True:
+        try:
+            item = drive_queue.get_nowait()
+        except queue.Empty:
+            break
+        if item is not None:
+            items.append(item)
+        drive_queue.task_done()
+    return items
+
+
+def save_queue(drive_paths):
+    """Persist the not-yet-processed drives so they survive the update restart."""
+    try:
+        os.makedirs(os.path.dirname(SAVED_QUEUE_FILE), exist_ok=True)
+        with open(SAVED_QUEUE_FILE, "w", encoding="utf-8") as f:
+            json.dump(list(drive_paths), f)
+        logging.info(f"Saved {len(drive_paths)} queued drive(s) for post-update resume.")
+    except Exception as e:
+        logging.error(f"Failed to save drive queue to {SAVED_QUEUE_FILE}: {e}")
+
+
+def load_saved_queue():
+    """Read and consume (delete) any saved drive queue from a prior update restart."""
+    if not os.path.exists(SAVED_QUEUE_FILE):
+        return []
+    try:
+        with open(SAVED_QUEUE_FILE, "r", encoding="utf-8") as f:
+            items = json.load(f)
+    except Exception as e:
+        logging.error(f"Failed to read saved drive queue {SAVED_QUEUE_FILE}: {e}")
+        items = []
+    try:
+        os.remove(SAVED_QUEUE_FILE)
+    except Exception as e:
+        logging.error(f"Failed to delete saved drive queue {SAVED_QUEUE_FILE}: {e}")
+    return items if isinstance(items, list) else []
+
+
+def trigger_update():
+    """
+    Launch the git updater detached. git_update.py shuts this program down via
+    quit.bat, pulls the new code, then restarts it via dobWin.bat. The updater
+    is started in its own detached process group so it is NOT killed when this
+    program is terminated.
+    """
+    updater = os.path.join(PROJECT_ROOT, "configs", "git_updater", "git_update.py")
+    if not os.path.exists(updater):
+        logging.error(f"Cannot apply scheduled update: {updater} not found.")
+        return
+    logging.info(f"Launching scheduled update via {updater}")
+    try:
+        if os.name == "nt":
+            DETACHED_PROCESS = 0x00000008
+            CREATE_NEW_PROCESS_GROUP = 0x00000200
+            CREATE_NO_WINDOW = 0x08000000
+            flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+            subprocess.Popen(
+                [sys.executable, updater],
+                cwd=PROJECT_ROOT,
+                creationflags=flags,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+            )
+        else:
+            subprocess.Popen(
+                [sys.executable, updater],
+                cwd=PROJECT_ROOT,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+            )
+    except Exception as e:
+        logging.error(f"Failed to launch updater: {e}", exc_info=True)
+
+
 def worker_thread(drive_queue, status_mgr):
     logging.info("Worker thread started. Waiting for drives...")
     while True:
@@ -947,25 +1272,74 @@ def worker_thread(drive_queue, status_mgr):
                     status_mgr.update(status_number=0)
 
             drive_queue.task_done()
+
+            # If the user scheduled an update to apply once the current drive
+            # finished, do it now — before draining the rest of the queue. We
+            # stash the still-pending drives, then launch the updater (which
+            # stops and restarts this program). The saved queue is re-enqueued
+            # automatically on the next startup.
+            if is_update_scheduled():
+                logging.warning("Scheduled update detected; applying now that the current drive is done.")
+                remaining = drain_queue(drive_queue)
+                save_queue(remaining)
+                clear_update_scheduled()
+                trigger_update()
+                logging.info("Updater launched; worker thread exiting to await program restart.")
+                return
         except Exception as e:
             logging.error(f"Error in worker thread: {e}", exc_info=True)
 
 
 def main():
-    status_mgr.update(status_number=0, running=1, completed_drives=[])
+    # The GitHub PAT is mandatory. It is read from the gitignored configs/keys.json
+    # (auto-created blank on first run). Without it, refuse to run and make the
+    # reason loud in every log so it is impossible to miss.
+    github_pat = get_github_pat()
+    if not github_pat:
+        msg = (
+            f"No GitHub PAT found. Open '{KEYS_FILE}', paste your token into the "
+            f"'{GITHUB_PAT_LABEL}' field, and restart. The Dobinator will NOT run "
+            f"without it."
+        )
+        logging.critical(msg)
+        _append_gitlog(msg)
+        status_mgr.update(running=0)
+        return
+
+    # Reset transient run state, but DO NOT wipe the completed-drives history:
+    # it now lives permanently in completedDrives.csv. Refresh the last-24h
+    # view and clear any stale update indicator so a fresh launch starts clean.
+    status_mgr.update(status_number=0, running=1)
+    status_mgr.set_update_available(False)
+    status_mgr.refresh_completed_drives()
     logging.info("Starting dobd.py drive monitor program...")
-    
+
     drive_queue = queue.Queue()
     worker = threading.Thread(target=worker_thread, args=(drive_queue, status_mgr), daemon=True)
     worker.start()
-    
+
+    # Background watcher that polls GitHub for new commits (cheap ETag checks).
+    update_watcher = UpdateWatcher(status_mgr, github_pat)
+    poll_count = 0
+
     # Instantly add all currently connected drives to the known list
     logging.debug("Fetching initial list of connected drives...")
     known_drives = get_connected_drives()
     logging.info(f"Initial drives detected and added to ignore list: {', '.join(known_drives) if known_drives else 'None'}")
-    
+
+    # Resume any drives that were still queued when a scheduled update restarted
+    # the program. They are enqueued directly (and marked known so the change
+    # detector does not also re-add them).
+    for drive in load_saved_queue():
+        if os.path.exists(drive):
+            known_drives.add(drive)
+            drive_queue.put(drive)
+            logging.info(f"Resuming queued drive after update restart: {drive}")
+        else:
+            logging.info(f"Saved drive {drive} is no longer connected; skipping resume.")
+
     logging.info("Entering main monitoring loop. Waiting for new drives...")
-    
+
     try:
         while True:
             logging.debug("Polling for currently connected drives...")
@@ -992,8 +1366,13 @@ def main():
                 if current_state.get("StatusNumber", 0) != 0:
                     status_mgr.update(status_number=0)
                 
+            # Every 5th poll (~5 seconds) check GitHub for a newer version.
+            poll_count += 1
+            if poll_count % GITHUB_CHECK_EVERY == 0:
+                update_watcher.trigger_check()
+
             # Sleep briefly before checking again to prevent high CPU usage
-            time.sleep(2)
+            time.sleep(1)
             
     except KeyboardInterrupt:
         logging.info("Program stopped by user via KeyboardInterrupt.")

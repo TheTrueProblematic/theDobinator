@@ -7,9 +7,12 @@ button is clicked.
 
 Endpoints
 ---------
-POST /power     -> launches dobWin.bat in a detached process; returns 200
-GET  /health    -> liveness check; returns 200 {"ok": true}
-*    *          -> 404
+POST /power            -> launches dobWin.bat in a detached process; returns 200
+POST /update           -> launches configs/dobGitManual.bat to apply an update now
+POST /schedule-update  -> writes logs/update_scheduled.flag so dobd.py applies the
+                          update once the current drive finishes processing
+GET  /health           -> liveness check; returns 200 {"ok": true}
+*    *                 -> 404
 
 Runs on 0.0.0.0:5050 by default. Configure on the Windows box via Task
 Scheduler so it starts at boot. See HostingInstructions.md.
@@ -32,6 +35,9 @@ from logging.handlers import RotatingFileHandler
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))                    # ...\srvr
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)                                   # ...\theDobinator
 DOB_BAT     = os.path.join(PROJECT_DIR, "dobWin.bat")
+UPDATE_BAT  = os.path.join(PROJECT_DIR, "configs", "dobGitManual.bat")
+LOGS_DIR    = os.path.join(PROJECT_DIR, "logs")
+UPDATE_SCHEDULED_FLAG = os.path.join(LOGS_DIR, "update_scheduled.flag")
 LOG_FILE    = os.path.join(SCRIPT_DIR, "srvr_api.log")
 
 HOST = os.environ.get("DOB_API_HOST", "0.0.0.0")
@@ -88,6 +94,58 @@ def trigger_power_toggle() -> tuple[bool, str]:
         return False, f"failed to launch: {exc!r}"
 
 
+def _launch_bat_detached(bat_path: str) -> tuple[bool, str]:
+    """Run a .bat file detached, with no window and stdin closed. Returns (ok, message)."""
+    if not os.path.isfile(bat_path):
+        return False, f"{os.path.basename(bat_path)} not found at {bat_path}"
+    try:
+        if os.name == "nt":
+            DETACHED_PROCESS = 0x00000008
+            CREATE_NEW_PROCESS_GROUP = 0x00000200
+            CREATE_NO_WINDOW = 0x08000000
+            flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+            subprocess.Popen(
+                ["cmd.exe", "/c", bat_path],
+                cwd=PROJECT_DIR,
+                creationflags=flags,
+                stdin=subprocess.DEVNULL,   # closed stdin lets the bat's `pause` return immediately
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+            )
+        else:
+            subprocess.Popen(
+                ["/bin/sh", "-c", f'echo "[mock] would run {bat_path}"'],
+                cwd=PROJECT_DIR,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+            )
+        return True, f"{os.path.basename(bat_path)} launched"
+    except Exception as exc:
+        return False, f"failed to launch: {exc!r}"
+
+
+def trigger_update_now() -> tuple[bool, str]:
+    """Apply an update immediately by launching configs/dobGitManual.bat."""
+    return _launch_bat_detached(UPDATE_BAT)
+
+
+def schedule_update() -> tuple[bool, str]:
+    """
+    Write the scheduled-update flag so dobd.py applies the update once the
+    drive it is currently processing finishes.
+    """
+    try:
+        os.makedirs(LOGS_DIR, exist_ok=True)
+        with open(UPDATE_SCHEDULED_FLAG, "w", encoding="utf-8") as f:
+            f.write("scheduled")
+        return True, "update scheduled for after current drive"
+    except Exception as exc:
+        return False, f"failed to schedule update: {exc!r}"
+
+
 # ---------------------------------------------------------------------------
 # HTTP handler
 # ---------------------------------------------------------------------------
@@ -135,6 +193,16 @@ class PowerHandler(BaseHTTPRequestHandler):
         if path == "/power":
             ok, msg = trigger_power_toggle()
             logger.info("power toggle requested: ok=%s msg=%s", ok, msg)
+            self._send_json(200 if ok else 500, {"ok": ok, "message": msg})
+            return
+        if path == "/update":
+            ok, msg = trigger_update_now()
+            logger.info("immediate update requested: ok=%s msg=%s", ok, msg)
+            self._send_json(200 if ok else 500, {"ok": ok, "message": msg})
+            return
+        if path == "/schedule-update":
+            ok, msg = schedule_update()
+            logger.info("scheduled update requested: ok=%s msg=%s", ok, msg)
             self._send_json(200 if ok else 500, {"ok": ok, "message": msg})
             return
         self._send_json(404, {"ok": False, "error": "not found"})

@@ -27,6 +27,13 @@
         The Dobinator
       </span>
       <div class="topbar-actions">
+        <button id="updateBtn" class="update-btn" aria-label="Apply available update" title="Update available">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <path d="M7 10l5 5 5-5"/>
+            <path d="M12 15V3"/>
+          </svg>
+        </button>
         <button id="historyBtn" class="history-btn" aria-label="View Completed Drives" title="View Completed Drives">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M20 6L9 17l-5-5"/>
@@ -56,6 +63,29 @@
         </div>
         <div id="historyList" class="modal-body">
           <!-- Populated by JS -->
+        </div>
+      </div>
+    </div>
+
+    <!-- Update-while-processing Modal -->
+    <div id="updateModal" class="modal hidden" aria-hidden="true">
+      <div class="modal-backdrop" id="updateModalBackdrop"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2 class="modal-title">Update Available</h2>
+          <button id="closeUpdateBtn" class="modal-close" aria-label="Close modal">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="modal-body">
+          <p class="subline" style="margin-top:0;">
+            Update cannot be applied while drives are processing. Would you like to
+            schedule this update for when processing completes?
+          </p>
+        </div>
+        <div class="modal-footer">
+          <button id="cancelUpdateBtn" class="modal-btn modal-btn-secondary">Cancel</button>
+          <button id="scheduleUpdateBtn" class="modal-btn modal-btn-primary">Schedule</button>
         </div>
       </div>
     </div>
