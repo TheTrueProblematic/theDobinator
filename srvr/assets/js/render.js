@@ -12,6 +12,8 @@ export const STATUS_LABELS = {
   5: 'Copying Specific Files',
   6: 'Issues Detected',
   7: 'Copying Airport Files',
+  8: 'Identifying Region',
+  9: 'Copying Base Files',
   10: 'Drive Completed Successfully',
   11: 'Drive Completed — Errors Detected',
 };
@@ -141,6 +143,22 @@ function screenForState(state) {
           `<p class="subline">Copying and unzipping the airport data set.</p>`
       };
 
+    case 8:
+      return {
+        cardClass: '',
+        inner: spinnerHeadline(STATUS_LABELS[8]) +
+          `<p class="subline">No packfiles on this drive — working out its region from the drive's name.<br/>
+            <em class="hint">The AI is thinking — this may take a while.</em></p>`
+      };
+
+    case 9:
+      return {
+        cardClass: '',
+        inner: spinnerHeadline(STATUS_LABELS[9]) +
+          progressBlock('base', state.CompletedBaseFiles, state.TotalBaseFiles) +
+          `<p class="subline">No packfiles on this drive — copying just the regional base files.</p>`
+      };
+
     case 10:
       return {
         cardClass: 'is-success',
@@ -245,7 +263,7 @@ export function render(state, prev) {
     prev && !prev._error &&
     prev.Running === 1 && state.Running === 1 &&
     prev.StatusNumber === state.StatusNumber &&
-    (state.StatusNumber === 3 || state.StatusNumber === 5)
+    (state.StatusNumber === 3 || state.StatusNumber === 5 || state.StatusNumber === 9)
   ) {
     updateProgressInPlace(stage, state);
     return true;
@@ -257,7 +275,7 @@ export function render(state, prev) {
 }
 
 function updateProgressInPlace(stage, state) {
-  const isBase = state.StatusNumber === 3;
+  const isBase = state.StatusNumber === 3 || state.StatusNumber === 9;
   const total = isBase ? state.TotalBaseFiles : state.TotalMainFiles;
   const completed = isBase ? state.CompletedBaseFiles : state.CompletedMainFiles;
   const safeTotal = (typeof total === 'number' && total > 0) ? total : 0;

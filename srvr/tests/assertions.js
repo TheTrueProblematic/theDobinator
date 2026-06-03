@@ -154,6 +154,37 @@ export const ASSERTIONS = [
   },
 
   {
+    name: 'Running=1, Status=8 shows identifying region for empty drive',
+    state: { Running: 1, StatusNumber: 8 },
+    check(doc) {
+      const r = bodyAttrs(doc, 1, 8); if (!r.passed) return r;
+      if (!$(doc, '.spinner')) return fail('spinner missing');
+      const card = $(doc, '.card');
+      if (!/identifying region/i.test(card.textContent)) return fail('expected "identifying region" copy');
+      if (!/no packfiles/i.test(card.textContent)) return fail('expected "no packfiles" copy');
+      return ok();
+    },
+  },
+
+  {
+    name: 'Running=1, Status=9 with 4/8 base files renders 50% bar (empty drive)',
+    state: { Running: 1, StatusNumber: 9, CompletedBaseFiles: 4, TotalBaseFiles: 8 },
+    check(doc) {
+      const r = bodyAttrs(doc, 1, 9); if (!r.passed) return r;
+      const bar = $(doc, '[data-progress-bar]');
+      if (!bar || bar.style.width !== '50%') {
+        return fail(`expected 50% width, got "${bar && bar.style.width}"`);
+      }
+      const meta = $(doc, '[data-progress-meta]');
+      if (!meta || !/4 of 8 files/.test(meta.textContent)) {
+        return fail(`progress meta="${meta && meta.textContent}", expected "4 of 8 files"`);
+      }
+      if (!/no packfiles/i.test($(doc, '.card').textContent)) return fail('expected "no packfiles" copy');
+      return ok();
+    },
+  },
+
+  {
     name: 'Running=1, Status=10 shows green success card',
     state: { Running: 1, StatusNumber: 10 },
     check(doc) {

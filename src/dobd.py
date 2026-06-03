@@ -643,11 +643,79 @@ def classifyRegion(llm_instance, drive_path, work_vars):
     logging.info(f"Region AFTER LLM processing: {region_after}")
     logging.info("--- Finished Region Classification ---")
 
-def copy_region_files(drive_path, work_vars):
+def classifyRegionByName(llm_instance, drive_path, work_vars):
+    """
+    Region classification for drives that arrive WITHOUT a packfiles.txt.
+
+    Unlike classifyRegion (which inspects packfiles.txt), an empty drive has
+    nothing on it to read, so the only hint available is the drive's own name.
+    We pull that name with Python (get_volume_name) and hand it to the LLM,
+    asking it to decide US vs International and record its answer by creating
+    either region-U.txt or region-I.txt on the root of the drive (contents = the
+    drive name). The region file is intentionally left in place here;
+    process_empty_drive removes it after the base files have been copied.
+    """
+    status_mgr.update(status_number=8)
+    logging.info("--- Starting Region Classification (by drive name) ---")
+
+    # Find the drive name in Python and feed it to the LLM via the prompt.
+    drive_name = get_volume_name(drive_path)
+    logging.info(f"Drive name used for region classification: '{drive_name}'")
+
+    # ========================================================================
+    # LLM PROMPT FOR REGION CLASSIFICATION (BY DRIVE NAME)
+    # ========================================================================
+    # The LLM runs with 'drive_path' as its working directory (the root of the
+    # drive being processed). [DRIVE] is replaced with the drive name above.
+    prompt = (
+        "Your task is to identify if this drive is intended to be used by a customer inside the US or outside the US. "
+        f"The name of the drive is {drive_name} and that should serve as your best hint. "
+        "Below are a couple of drive names and their regions to serve as examples:\n"
+        "BasinElectric -> US (we can tell this since Basin Electric is the name of a US utility company).\n"
+        "CalNatGuard -> US (since it's california's national guard this is obvious)\n"
+        "SwedishNP -> International (again it says Swedish so you can figure it out)\n"
+        "NMGameFish -> US (NM stands for New Mexico)\n\n"
+        "Some will be tricky and only be companies and some will be more clear. Once you have identified the region "
+        "you will create a new file at the root of this drive called either region-I.txt (for international) or "
+        "region-U.txt (for US). DO NOT CREATE ANY OTHER FILES WITH ANY OTHER NAMES! The contents of the text file "
+        "should be just the drive name. "
+    )
+    # ========================================================================
+
+    logging.info(f"Sending prompt to LLM: '{prompt}'")
+    llm_instance.useLoc(prompt, drive_path)
+
+    # The LLM signals the region by creating region-U.txt or region-I.txt on the
+    # root of the drive. Detect which one it made and record it in workVars.
+    region_u_path = os.path.join(drive_path, "region-U.txt")
+    region_i_path = os.path.join(drive_path, "region-I.txt")
+
+    region_determined = None
+    if os.path.exists(region_u_path):
+        region_determined = "U"
+    elif os.path.exists(region_i_path):
+        region_determined = "I"
+
+    if region_determined:
+        logging.info(f"LLM created region file. Region is: {region_determined}")
+        work_vars.remove_row("Region")
+        work_vars.add_row("Region", region_determined)
+    else:
+        logging.warning("LLM failed to create region-U.txt or region-I.txt to indicate region.")
+
+    region_after = work_vars.get_data_by_name("Region")
+    logging.info(f"Region AFTER LLM processing: {region_after}")
+    logging.info("--- Finished Region Classification (by drive name) ---")
+
+def copy_region_files(drive_path, work_vars, status_number=3):
     """
     Copies the appropriate files to the drive based on the identified region.
+
+    `status_number` lets callers reflect a distinct WebUI step: the normal build
+    reports step 3 ("Copying Base Files") while the empty-drive path reports
+    step 9 (its own base-files-only copy) via copy_base_files.
     """
-    status_mgr.update(status_number=3)
+    status_mgr.update(status_number=status_number)
     logging.info("--- Starting File Copy Process ---")
     region = work_vars.get_data_by_name("Region")
     
@@ -729,6 +797,18 @@ def copy_region_files(drive_path, work_vars):
             logging.error(f"Failed to execute robocopy command: {e}")
 
     logging.info(f"--- Finished File Copy Process. Successfully copied {completedBaseFiles} out of {totalBaseFiles} items. ---")
+
+def copy_base_files(drive_path, work_vars):
+    """
+    Copies the regional base files for an empty drive (one with no packfiles.txt).
+
+    This is the empty-drive counterpart to copy_region_files: it performs the very
+    same robocopy work, but reports its own WebUI status (step 9) so the user can
+    clearly see that an empty drive is only receiving its regional base files.
+    """
+    logging.info("--- Starting Base File Copy Process (empty drive) ---")
+    copy_region_files(drive_path, work_vars, status_number=9)
+    logging.info("--- Finished Base File Copy Process (empty drive) ---")
 
 # Source location of the airport archive on the U drive.
 AIRPORT_ZIP_SOURCE = r"U:\ARS\Data\airport\airport.zip"
@@ -1100,10 +1180,12 @@ def process_drive(drive_path):
 
     logging.debug(f"Looking for packfiles.txt at: {packfiles_path}")
     
-    # Check if packfiles.txt exists on the root of the drive
+    # Check if packfiles.txt exists on the root of the drive. If it is missing,
+    # this is an "empty" drive: rather than skip it, we hand off to the
+    # process_empty_drive workflow which copies only the regional base files.
     if not os.path.exists(packfiles_path):
-        logging.info(f"packfiles.txt NOT FOUND on {drive_path}. Skipping this drive.")
-        return None
+        logging.info(f"packfiles.txt NOT FOUND on {drive_path}. Switching to empty-drive processing.")
+        return process_empty_drive(drive_path)
 
     logging.info(f"Found packfiles.txt on {drive_path}. Proceeding with processing.")
     status_mgr.update(status_number=1)
@@ -1157,6 +1239,72 @@ def process_drive(drive_path):
     
     logging.info(f"========== Finished initial processing for {drive_path} ==========")
     return issues_found
+
+
+def process_empty_drive(drive_path):
+    """
+    Process a newly connected drive that has NO packfiles.txt on its root.
+
+    Whereas process_drive builds a full data drive, an "empty" drive only gets the
+    regional base files. Because there is no packfiles.txt to read the region from,
+    the region is inferred by the LLM from the drive's NAME (classifyRegionByName).
+    Once the base files are copied, BOTH dobDir and the region file the LLM created
+    are deleted, and the drive is reported as completed exactly like a normal build.
+
+    Returns False (no issues) on completion so the worker thread records it as a
+    completed drive, or True if the drive could not even be prepared.
+    """
+    logging.info(f"========== Starting EMPTY-DRIVE processing for: {drive_path} ==========")
+    status_mgr.update(status_number=1)
+    dobdir_path = os.path.join(drive_path, "dobDir")
+
+    # Same dobDir lifecycle as process_drive: temporary work files (workVars.csv,
+    # the copy_files.bat reference) live in dobDir on the target drive.
+    if os.path.exists(dobdir_path):
+        logging.info(f"Directory {dobdir_path} already exists. Deleting it first...")
+        try:
+            shutil.rmtree(dobdir_path)
+            logging.info(f"SUCCESS: Deleted existing directory {dobdir_path}")
+        except Exception as e:
+            logging.error(f"FAILED to delete existing directory {dobdir_path}. Exception details: {e}")
+            return True
+
+    logging.info(f"Attempting to create dobDir on {drive_path}...")
+    try:
+        os.makedirs(dobdir_path)
+        logging.info(f"SUCCESS: Created directory {dobdir_path}")
+    except Exception as e:
+        logging.error(f"FAILED to create directory {dobdir_path}. Exception details: {e}")
+        return True
+
+    # Initialize the workVars.csv file in the dobDir directory
+    workvars_path = os.path.join(dobdir_path, "workVars.csv")
+    work_vars = WorkVars(workvars_path)
+
+    # Identify the region from the drive's NAME, then copy the regional base files.
+    dobsy = LLM()
+    classifyRegionByName(dobsy, drive_path, work_vars)
+    copy_base_files(drive_path, work_vars)
+
+    # Clean up: remove dobDir AND the region file the LLM created on the root.
+    logging.info(f"Cleaning up {dobdir_path}...")
+    try:
+        shutil.rmtree(dobdir_path)
+        logging.info(f"SUCCESS: Deleted directory {dobdir_path}")
+    except Exception as e:
+        logging.error(f"FAILED to delete directory {dobdir_path}. Exception details: {e}")
+
+    for region_file in ("region-U.txt", "region-I.txt"):
+        region_path = os.path.join(drive_path, region_file)
+        if os.path.exists(region_path):
+            try:
+                os.remove(region_path)
+                logging.info(f"SUCCESS: Deleted region file {region_path}")
+            except Exception as e:
+                logging.error(f"FAILED to delete region file {region_path}. Exception details: {e}")
+
+    logging.info(f"========== Finished EMPTY-DRIVE processing for {drive_path} ==========")
+    return False
 
 
 def _append_gitlog(message):

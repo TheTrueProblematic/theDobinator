@@ -3,7 +3,7 @@
   "configurations": [
     {
       "name": "srvr",
-      "runtimeExecutable": "python3",
+      "runtimeExecutable": "python",
       "runtimeArgs": ["-m", "http.server", "8765", "--directory", "srvr"],
       "port": 8765
     }

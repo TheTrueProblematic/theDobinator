@@ -62,11 +62,12 @@ async function handlePowerClick() {
 }
 
 // A drive is actively being worked when the program is running and the status
-// is one of the in-progress steps (1–7). Idle/finished states (0, 10, 11) mean
-// nothing is processing, so an update can be applied right away.
+// is one of the in-progress steps (1–9, which includes the empty-drive region
+// and base-copy steps 8 and 9). Idle/finished states (0, 10, 11) mean nothing
+// is processing, so an update can be applied right away.
 function isProcessing() {
   const s = lastState;
-  return !!(s && s.Running === 1 && s.StatusNumber >= 1 && s.StatusNumber <= 7);
+  return !!(s && s.Running === 1 && s.StatusNumber >= 1 && s.StatusNumber <= 9);
 }
 
 function closeUpdateModal() {
