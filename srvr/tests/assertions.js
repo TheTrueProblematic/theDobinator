@@ -154,32 +154,60 @@ export const ASSERTIONS = [
   },
 
   {
-    name: 'Running=1, Status=8 shows identifying region for empty drive',
-    state: { Running: 1, StatusNumber: 8 },
+    name: 'Running=1, Status=8 with 3/6 main files renders 50% country-files bar',
+    state: { Running: 1, StatusNumber: 8, CompletedMainFiles: 3, TotalMainFiles: 6 },
     check(doc) {
       const r = bodyAttrs(doc, 1, 8); if (!r.passed) return r;
-      if (!$(doc, '.spinner')) return fail('spinner missing');
       const card = $(doc, '.card');
-      if (!/identifying region/i.test(card.textContent)) return fail('expected "identifying region" copy');
-      if (!/no packfiles/i.test(card.textContent)) return fail('expected "no packfiles" copy');
-      return ok();
-    },
-  },
-
-  {
-    name: 'Running=1, Status=9 with 4/8 base files renders 50% bar (empty drive)',
-    state: { Running: 1, StatusNumber: 9, CompletedBaseFiles: 4, TotalBaseFiles: 8 },
-    check(doc) {
-      const r = bodyAttrs(doc, 1, 9); if (!r.passed) return r;
+      if (!/country files/i.test(card.textContent)) return fail('expected "country files" copy');
       const bar = $(doc, '[data-progress-bar]');
       if (!bar || bar.style.width !== '50%') {
         return fail(`expected 50% width, got "${bar && bar.style.width}"`);
       }
       const meta = $(doc, '[data-progress-meta]');
-      if (!meta || !/4 of 8 files/.test(meta.textContent)) {
-        return fail(`progress meta="${meta && meta.textContent}", expected "4 of 8 files"`);
+      if (!meta || !/3 of 6 files/.test(meta.textContent)) {
+        return fail(`progress meta="${meta && meta.textContent}", expected "3 of 6 files"`);
       }
-      if (!/no packfiles/i.test($(doc, '.card').textContent)) return fail('expected "no packfiles" copy');
+      return ok();
+    },
+  },
+
+  {
+    name: 'Running=1, Status=9 shows formatting drive with spinner and no progress bar',
+    state: { Running: 1, StatusNumber: 9 },
+    check(doc) {
+      const r = bodyAttrs(doc, 1, 9); if (!r.passed) return r;
+      if (!$(doc, '.spinner')) return fail('spinner missing');
+      const card = $(doc, '.card');
+      if (!/formatting drive/i.test(card.textContent)) return fail('expected "formatting drive" copy');
+      if ($(doc, '[data-progress-bar]')) return fail('formatting step should not show a progress bar');
+      return ok();
+    },
+  },
+
+  {
+    name: 'Pending list renders drive names and rounded TB sizes',
+    state: { Running: 1, StatusNumber: 0, PendingDrives: [
+      { name: 'BasinElectric', sizeTB: 2 },
+      { name: 'Swedish_NP', sizeTB: 1 },
+    ] },
+    check(doc) {
+      const items = $$(doc, '#pendingList .pending-item');
+      if (items.length !== 2) return fail(`expected 2 pending items, got ${items.length}`);
+      const text = $(doc, '#pendingList').textContent;
+      if (!/BasinElectric/.test(text)) return fail('expected BasinElectric in pending list');
+      if (!/2 TB/.test(text)) return fail('expected "2 TB" size label');
+      if (!/Swedish_NP/.test(text)) return fail('expected Swedish_NP in pending list');
+      return ok();
+    },
+  },
+
+  {
+    name: 'Empty pending list shows a friendly placeholder',
+    state: { Running: 1, StatusNumber: 0, PendingDrives: [] },
+    check(doc) {
+      const text = $(doc, '#pendingList')?.textContent || '';
+      if (!/no drives waiting/i.test(text)) return fail('expected empty pending placeholder');
       return ok();
     },
   },

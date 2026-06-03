@@ -22,15 +22,35 @@
         <span class="brand-dot" aria-hidden="true"></span>
         The Dobinator
       </span>
-      <button id="powerBtn" class="power-btn" aria-label="Toggle The Dobinator">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M12 2v10"/>
-          <path d="M5.6 6.4a8 8 0 1 0 12.8 0"/>
-        </svg>
-      </button>
+      <div class="topbar-actions">
+        <button id="pendingBtn" class="pending-btn" aria-label="View Pending Drives" title="View Pending Drives">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="9"/>
+            <path d="M12 7v5l3 2"/>
+          </svg>
+          <span id="pendingCount" class="pending-count" aria-hidden="true"></span>
+        </button>
+        <button id="powerBtn" class="power-btn" aria-label="Toggle The Dobinator">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 2v10"/>
+            <path d="M5.6 6.4a8 8 0 1 0 12.8 0"/>
+          </svg>
+        </button>
+      </div>
     </header>
     <main id="stage" class="stage" aria-live="polite"></main>
+
+    <!-- Pending Drives Modal (so the preview/test harness can render the list) -->
+    <div id="pendingModal" class="modal hidden" aria-hidden="true">
+      <div class="modal-backdrop" id="pendingModalBackdrop"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2 class="modal-title">Pending Drives</h2>
+        </div>
+        <div id="pendingList" class="modal-body"></div>
+      </div>
+    </div>
   </div>
 
   <script type="module">

@@ -34,6 +34,13 @@
             <path d="M12 15V3"/>
           </svg>
         </button>
+        <button id="pendingBtn" class="pending-btn" aria-label="View Pending Drives" title="View Pending Drives">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="9"/>
+            <path d="M12 7v5l3 2"/>
+          </svg>
+          <span id="pendingCount" class="pending-count" aria-hidden="true"></span>
+        </button>
         <button id="historyBtn" class="history-btn" aria-label="View Completed Drives" title="View Completed Drives">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M20 6L9 17l-5-5"/>
@@ -63,6 +70,48 @@
         </div>
         <div id="historyList" class="modal-body">
           <!-- Populated by JS -->
+        </div>
+      </div>
+    </div>
+
+    <!-- Pending Drives Modal -->
+    <div id="pendingModal" class="modal hidden" aria-hidden="true">
+      <div class="modal-backdrop" id="pendingModalBackdrop"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2 class="modal-title">Pending Drives</h2>
+          <button id="closePendingBtn" class="modal-close" aria-label="Close modal">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div id="pendingList" class="modal-body">
+          <!-- Populated by JS -->
+        </div>
+      </div>
+    </div>
+
+    <!-- New-Drive Prompt Modal (blank drives awaiting name + country) -->
+    <div id="drivePromptModal" class="modal hidden" aria-hidden="true">
+      <div class="modal-backdrop"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2 class="modal-title" id="drivePromptTitle">New Drive</h2>
+        </div>
+        <div class="modal-body">
+          <label class="form-field">
+            <span class="form-label">Drive Name</span>
+            <input id="driveNameInput" class="form-input" type="text" autocomplete="off"
+                   spellcheck="false" placeholder="e.g. BasinElectric" />
+          </label>
+          <label class="form-field">
+            <span class="form-label">Country</span>
+            <select id="driveCountrySelect" class="form-input">
+              <!-- Populated by JS -->
+            </select>
+          </label>
+        </div>
+        <div class="modal-footer modal-footer-center">
+          <button id="confirmDriveBtn" class="modal-btn modal-btn-confirm" disabled>Confirm</button>
         </div>
       </div>
     </div>

@@ -18,8 +18,8 @@ const STATE_BUTTONS = [
   { sn: 5,  label: '5 · File copy' },
   { sn: 6,  label: '6 · Issues' },
   { sn: 7,  label: '7 · Airport copy' },
-  { sn: 8,  label: '8 · Empty region' },
-  { sn: 9,  label: '9 · Base copy (empty)' },
+  { sn: 8,  label: '8 · Country files' },
+  { sn: 9,  label: '9 · Formatting' },
   { sn: 10, label: '10 · Success' },
   { sn: 11, label: '11 · Errors' },
 ];

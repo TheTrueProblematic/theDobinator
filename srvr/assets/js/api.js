@@ -12,6 +12,8 @@ const DEFAULT_STATE = Object.freeze({
   TotalMainFiles: -1,
   CompletedMainFiles: -1,
   CompletedDrives: [],
+  BlankDrives: [],
+  PendingDrives: [],
   UpdateAvailable: 0,
 });
 
@@ -23,6 +25,8 @@ export const ERROR_STATE = Object.freeze({
   TotalMainFiles: -1,
   CompletedMainFiles: -1,
   CompletedDrives: [],
+  BlankDrives: [],
+  PendingDrives: [],
   UpdateAvailable: 0,
   _error: true,
 });
@@ -65,13 +69,18 @@ export async function scheduleUpdate() {
   return postToApi('/schedule-update');
 }
 
-async function postToApi(path) {
+// Submit a blank drive's user-supplied Drive Name + Country (ISO Alpha-3).
+export async function submitDrive({ token, name, country }) {
+  return postToApi('/submit-drive', { token, name, country });
+}
+
+async function postToApi(path, body = {}) {
   const url = `${window.location.protocol}//${window.location.hostname}:${API_PORT}${path}`;
   const res = await fetch(url, {
     method: 'POST',
     mode: 'cors',
     headers: { 'Content-Type': 'application/json' },
-    body: '{}',
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`${path} endpoint returned HTTP ${res.status}`);
   return res.json().catch(() => ({ ok: true }));

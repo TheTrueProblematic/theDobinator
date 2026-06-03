@@ -108,7 +108,7 @@ html, body {
   gap: 1rem;
 }
 
-.power-btn, .history-btn, .update-btn {
+.power-btn, .history-btn, .update-btn, .pending-btn {
   width: 48px;
   height: 48px;
   border-radius: 50%;
@@ -127,20 +127,43 @@ html, body {
   position: relative;
 }
 
-.power-btn:hover, .history-btn:hover {
+.power-btn:hover, .history-btn:hover, .pending-btn:hover {
   transform: translateY(-2px) scale(1.05);
   background: var(--fg);
   color: var(--bg);
   box-shadow: 0 6px 18px rgba(0,0,0,.18);
 }
 
-.power-btn:active, .history-btn:active, .update-btn:active { transform: translateY(0) scale(.97); }
+.power-btn:active, .history-btn:active, .update-btn:active, .pending-btn:active { transform: translateY(0) scale(.97); }
 
-.power-btn svg, .history-btn svg, .update-btn svg {
+.power-btn svg, .history-btn svg, .update-btn svg, .pending-btn svg {
   width: 20px;
   height: 20px;
   display: block;
 }
+
+/* ---------- Pending-drives button + count badge ---------- */
+
+.pending-count {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--fg);
+  color: var(--bg);
+  font-size: .62rem;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  display: none;            /* shown via .is-visible when count > 0 */
+  pointer-events: none;
+}
+.pending-count.is-visible { display: block; }
+/* Keep the badge legible while the button is hovered (button fills with --fg). */
+.pending-btn:hover .pending-count { background: var(--bg); color: var(--fg); }
 
 /* ---------- Update button (yellow, hidden until an update is available) ---------- */
 
@@ -422,6 +445,85 @@ body[data-running="0"] .power-btn {
 }
 .modal-btn-primary:hover {
   box-shadow: 0 6px 18px color-mix(in srgb, var(--warning) 35%, transparent);
+}
+
+/* Footer with a single centered action (the New-Drive confirm button). */
+.modal-footer-center { justify-content: center; }
+
+/* Confirm button: muted/disabled until both fields are filled, then turns
+   solid white to invite the click. */
+.modal-btn-confirm {
+  background: transparent;
+  border: 1px solid var(--card-border);
+  color: var(--muted);
+  min-width: 160px;
+  cursor: not-allowed;
+}
+.modal-btn-confirm.is-ready {
+  background: #ffffff;
+  border-color: #ffffff;
+  color: #0a0a0a;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(255,255,255,.18);
+}
+.modal-btn-confirm.is-ready:hover { transform: translateY(-1px); }
+
+/* ---------- Form fields (New-Drive prompt) ---------- */
+
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: .4rem;
+}
+
+.form-label {
+  font-size: .72rem;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.form-input {
+  font-family: inherit;
+  font-size: .95rem;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-sm);
+  padding: .7rem .85rem;
+  width: 100%;
+  outline: none;
+  transition: border-color .2s var(--ease), box-shadow .2s var(--ease);
+}
+.form-input:focus {
+  border-color: var(--fg);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--fg) 12%, transparent);
+}
+select.form-input { cursor: pointer; }
+
+/* ---------- Pending-drive list items ---------- */
+
+.pending-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--card-border);
+  background: rgba(128, 128, 128, 0.03);
+}
+.pending-item-name {
+  font-weight: 500;
+  font-size: 0.95rem;
+  word-break: break-all;
+}
+.pending-item-size {
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--muted);
 }
 
 .history-item {

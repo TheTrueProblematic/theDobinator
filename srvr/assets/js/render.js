@@ -12,8 +12,8 @@ export const STATUS_LABELS = {
   5: 'Copying Specific Files',
   6: 'Issues Detected',
   7: 'Copying Airport Files',
-  8: 'Identifying Region',
-  9: 'Copying Base Files',
+  8: 'Copying Country Files',
+  9: 'Formatting Drive',
   10: 'Drive Completed Successfully',
   11: 'Drive Completed — Errors Detected',
 };
@@ -147,16 +147,15 @@ function screenForState(state) {
       return {
         cardClass: '',
         inner: spinnerHeadline(STATUS_LABELS[8]) +
-          `<p class="subline">No packfiles on this drive — working out its region from the drive's name.<br/>
-            <em class="hint">The AI is thinking — this may take a while.</em></p>`
+          progressBlock('main', state.CompletedMainFiles, state.TotalMainFiles) +
+          `<p class="subline">Copying the country-specific imagery, vector, and geocode sets.</p>`
       };
 
     case 9:
       return {
         cardClass: '',
         inner: spinnerHeadline(STATUS_LABELS[9]) +
-          progressBlock('base', state.CompletedBaseFiles, state.TotalBaseFiles) +
-          `<p class="subline">No packfiles on this drive — copying just the regional base files.</p>`
+          `<p class="subline">Erasing and labeling the drive before the build begins.</p>`
       };
 
     case 10:
@@ -229,6 +228,15 @@ export function render(state, prev) {
     updateBtn.classList.toggle('is-visible', showUpdate);
   }
 
+  // Reflect the pending-drive count badge on every render (independent of the
+  // change gate below) so it stays in sync immediately.
+  const pendingCount = document.getElementById('pendingCount');
+  if (pendingCount) {
+    const n = Array.isArray(state.PendingDrives) ? state.PendingDrives.length : 0;
+    pendingCount.textContent = n > 99 ? '99+' : String(n);
+    pendingCount.classList.toggle('is-visible', n > 0);
+  }
+
   const stage = document.getElementById('stage');
   if (!stage) return false;
 
@@ -241,13 +249,19 @@ export function render(state, prev) {
     prev.CompletedBaseFiles !== state.CompletedBaseFiles ||
     prev.TotalMainFiles !== state.TotalMainFiles ||
     prev.CompletedMainFiles !== state.CompletedMainFiles ||
-    JSON.stringify(prev.CompletedDrives) !== JSON.stringify(state.CompletedDrives);
+    JSON.stringify(prev.CompletedDrives) !== JSON.stringify(state.CompletedDrives) ||
+    JSON.stringify(prev.PendingDrives) !== JSON.stringify(state.PendingDrives);
 
   if (!changed) return false;
 
   // Render history list if it changed
   if (!prev || JSON.stringify(prev.CompletedDrives) !== JSON.stringify(state.CompletedDrives)) {
     renderHistory(state.CompletedDrives);
+  }
+
+  // Render pending list if it changed
+  if (!prev || JSON.stringify(prev.PendingDrives) !== JSON.stringify(state.PendingDrives)) {
+    renderPending(state.PendingDrives);
   }
 
   // Connection error wins over everything.
@@ -263,7 +277,7 @@ export function render(state, prev) {
     prev && !prev._error &&
     prev.Running === 1 && state.Running === 1 &&
     prev.StatusNumber === state.StatusNumber &&
-    (state.StatusNumber === 3 || state.StatusNumber === 5 || state.StatusNumber === 9)
+    (state.StatusNumber === 3 || state.StatusNumber === 5 || state.StatusNumber === 8)
   ) {
     updateProgressInPlace(stage, state);
     return true;
@@ -275,7 +289,7 @@ export function render(state, prev) {
 }
 
 function updateProgressInPlace(stage, state) {
-  const isBase = state.StatusNumber === 3 || state.StatusNumber === 9;
+  const isBase = state.StatusNumber === 3;
   const total = isBase ? state.TotalBaseFiles : state.TotalMainFiles;
   const completed = isBase ? state.CompletedBaseFiles : state.CompletedMainFiles;
   const safeTotal = (typeof total === 'number' && total > 0) ? total : 0;
@@ -300,6 +314,27 @@ function formatTimestamp(ts) {
   return d.toLocaleString([], {
     month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
   });
+}
+
+function renderPending(pendingDrives = []) {
+  const list = document.getElementById('pendingList');
+  if (!list) return;
+
+  if (!pendingDrives || pendingDrives.length === 0) {
+    list.innerHTML = `<div class="subline" style="text-align: center; margin-top: 0;">No drives waiting to be processed.</div>`;
+    return;
+  }
+
+  list.innerHTML = pendingDrives.map(drive => {
+    const name = esc(drive.name || 'Unnamed Drive');
+    const size = (typeof drive.sizeTB === 'number') ? drive.sizeTB : 0;
+    return `
+      <div class="pending-item">
+        <div class="pending-item-name">${name}</div>
+        <div class="pending-item-size">${esc(size)} TB</div>
+      </div>
+    `;
+  }).join('');
 }
 
 function renderHistory(completedDrives = []) {

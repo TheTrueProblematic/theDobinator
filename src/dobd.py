@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import time
 import ctypes
@@ -52,6 +53,13 @@ COMPLETED_DRIVES_CSV = os.path.join(LOGS_DIR, "completedDrives.csv")
 # restart that an update triggers.
 UPDATE_SCHEDULED_FLAG = os.path.join(LOGS_DIR, "update_scheduled.flag")
 SAVED_QUEUE_FILE = os.path.join(LOGS_DIR, "drive_queue.json")
+
+# --- Blank-drive submission inbox ---
+# When a drive without packfiles.txt is detected, the WebUI prompts the user for
+# a Drive Name + Country. The companion API (srvr_api.py) drops one JSON file per
+# submission into this directory ({token, name, country}); the monitoring loop in
+# dobd.py consumes them, formats+queues the matching drive, and deletes the file.
+SUBMISSIONS_DIR = os.path.join(LOGS_DIR, "submissions")
 
 # --- GitHub update watcher configuration ---
 # Used purely to poll for new commits via cheap HTTP conditional (ETag)
@@ -202,6 +210,11 @@ class StatusManager:
     """Manages the status.json file for tracking program state."""
     def __init__(self, filepath):
         self.filepath = filepath
+        # All read-modify-write sequences go through this lock because status.json
+        # is now written from several threads (worker + drive-monitor loop).
+        # RLock so methods that call each other (add_completed_drive ->
+        # refresh_completed_drives) don't self-deadlock.
+        self._lock = threading.RLock()
         os.makedirs(os.path.dirname(self.filepath), exist_ok=True)
 
     def _read_data(self):
@@ -212,6 +225,8 @@ class StatusManager:
             "TotalMainFiles": -1,
             "CompletedMainFiles": -1,
             "CompletedDrives": [],
+            "BlankDrives": [],
+            "PendingDrives": [],
             "UpdateAvailable": 0,
             "Running": 1
         }
@@ -231,31 +246,44 @@ class StatusManager:
             logging.error(f"Failed to write status to {self.filepath}: {e}")
 
     def update(self, status_number=None, total_base=None, comp_base=None, total_main=None, comp_main=None, running=None, completed_drives=None):
-        data = self._read_data()
-        
-        if status_number is not None:
-            data["StatusNumber"] = status_number
-            if status_number == 0:
-                data["TotalBaseFiles"] = -1
-                data["CompletedBaseFiles"] = -1
-                data["TotalMainFiles"] = -1
-                data["CompletedMainFiles"] = -1
-                
-        if total_base is not None: data["TotalBaseFiles"] = total_base
-        if comp_base is not None: data["CompletedBaseFiles"] = comp_base
-        if total_main is not None: data["TotalMainFiles"] = total_main
-        if comp_main is not None: data["CompletedMainFiles"] = comp_main
-        if completed_drives is not None: data["CompletedDrives"] = completed_drives
-        if running is not None: data["Running"] = running
-        
-        self._write_data(data)
+        with self._lock:
+            data = self._read_data()
+
+            if status_number is not None:
+                data["StatusNumber"] = status_number
+                if status_number == 0:
+                    data["TotalBaseFiles"] = -1
+                    data["CompletedBaseFiles"] = -1
+                    data["TotalMainFiles"] = -1
+                    data["CompletedMainFiles"] = -1
+
+            if total_base is not None: data["TotalBaseFiles"] = total_base
+            if comp_base is not None: data["CompletedBaseFiles"] = comp_base
+            if total_main is not None: data["TotalMainFiles"] = total_main
+            if comp_main is not None: data["CompletedMainFiles"] = comp_main
+            if completed_drives is not None: data["CompletedDrives"] = completed_drives
+            if running is not None: data["Running"] = running
+
+            self._write_data(data)
 
     def set_update_available(self, available):
         """Flip the WebUI 'update available' indicator on or off."""
-        data = self._read_data()
-        new_val = 1 if available else 0
-        if data.get("UpdateAvailable", 0) != new_val:
-            data["UpdateAvailable"] = new_val
+        with self._lock:
+            data = self._read_data()
+            new_val = 1 if available else 0
+            if data.get("UpdateAvailable", 0) != new_val:
+                data["UpdateAvailable"] = new_val
+                self._write_data(data)
+
+    def set_drive_lists(self, blank_drives, pending_drives):
+        """
+        Publish the current blank-drive (awaiting user input) and pending-drive
+        (queued, not yet started) lists to status.json for the WebUI.
+        """
+        with self._lock:
+            data = self._read_data()
+            data["BlankDrives"] = list(blank_drives)
+            data["PendingDrives"] = list(pending_drives)
             self._write_data(data)
 
     def _load_recent_completed_drives(self, hours=24):
@@ -290,10 +318,11 @@ class StatusManager:
 
     def refresh_completed_drives(self):
         """Recompute the last-24h completed-drive list and store it in status.json."""
-        recent = self._load_recent_completed_drives()
-        data = self._read_data()
-        data["CompletedDrives"] = recent
-        self._write_data(data)
+        with self._lock:
+            recent = self._load_recent_completed_drives()
+            data = self._read_data()
+            data["CompletedDrives"] = recent
+            self._write_data(data)
 
     def add_completed_drive(self, name, had_issues):
         """
@@ -312,6 +341,97 @@ class StatusManager:
         self.refresh_completed_drives()
 
 status_mgr = StatusManager(STATUS_FILE)
+
+
+def sanitize_drive_name(name):
+    """
+    Normalize a user-entered drive name: strip leading/trailing whitespace and
+    replace any internal run of whitespace with a single underscore. Mirrors the
+    sanitization the WebUI does so the backend never trusts raw input.
+    """
+    return re.sub(r"\s+", "_", (name or "").strip())
+
+
+def drive_size_tb(drive_path):
+    """Total capacity of the drive rounded to the nearest (decimal) TB."""
+    try:
+        total = shutil.disk_usage(drive_path).total
+        return int(round(total / 1_000_000_000_000))
+    except Exception as e:
+        logging.error(f"Failed to read size of {drive_path}: {e}")
+        return 0
+
+
+class DriveManager:
+    """
+    Thread-safe registry of drives the bot knows about but has not finished:
+
+      * blank-awaiting — drives detected WITHOUT packfiles.txt that are waiting
+        for the user to supply a Drive Name + Country in the WebUI. Each gets a
+        unique `token` so the WebUI can serialize the popups even if a drive
+        letter is later reused.
+      * pending — jobs that have been queued for the worker but have not started
+        yet (both packfiles drives and submitted country drives).
+
+    Both lists are published to status.json (BlankDrives / PendingDrives) for the
+    WebUI after every change.
+    """
+
+    def __init__(self, status_mgr):
+        self.status_mgr = status_mgr
+        self._lock = threading.Lock()
+        self._blank = []      # [{token, drive, sizeTB}]
+        self._pending = []    # [job dicts]
+        self._token_seq = 0
+
+    def _publish(self):
+        # Caller holds self._lock.
+        blank_pub = [{"token": b["token"], "sizeTB": b["sizeTB"]} for b in self._blank]
+        pending_pub = [{"name": j.get("name", ""), "sizeTB": j.get("sizeTB", 0)} for j in self._pending]
+        self.status_mgr.set_drive_lists(blank_pub, pending_pub)
+
+    # --- blank-awaiting drives -------------------------------------------------
+    def add_blank(self, drive, size_tb):
+        with self._lock:
+            self._token_seq += 1
+            token = f"blk-{self._token_seq}-{drive[0]}"
+            self._blank.append({"token": token, "drive": drive, "sizeTB": size_tb})
+            self._publish()
+            plog.info(f"Blank drive {drive} registered awaiting user input (token={token}).")
+            return token
+
+    def remove_blank_by_drive(self, drive):
+        with self._lock:
+            before = len(self._blank)
+            self._blank = [b for b in self._blank if b["drive"] != drive]
+            if len(self._blank) != before:
+                self._publish()
+
+    def pop_blank_by_token(self, token):
+        with self._lock:
+            match = next((b for b in self._blank if b["token"] == token), None)
+            if match:
+                self._blank = [b for b in self._blank if b["token"] != token]
+                self._publish()
+            return match
+
+    # --- pending (queued) jobs -------------------------------------------------
+    def add_pending(self, job):
+        with self._lock:
+            self._pending.append(job)
+            self._publish()
+
+    def start_job(self, job):
+        """Mark a job as started (remove it from the pending list)."""
+        with self._lock:
+            before = len(self._pending)
+            self._pending = [j for j in self._pending if j.get("path") != job.get("path")]
+            if len(self._pending) != before:
+                self._publish()
+
+
+drive_manager = DriveManager(status_mgr)
+
 
 class WorkVars:
     """Manages the workVars.csv file in the dobDir directory."""
@@ -643,77 +763,13 @@ def classifyRegion(llm_instance, drive_path, work_vars):
     logging.info(f"Region AFTER LLM processing: {region_after}")
     logging.info("--- Finished Region Classification ---")
 
-def classifyRegionByName(llm_instance, drive_path, work_vars):
-    """
-    Region classification for drives that arrive WITHOUT a packfiles.txt.
-
-    Unlike classifyRegion (which inspects packfiles.txt), an empty drive has
-    nothing on it to read, so the only hint available is the drive's own name.
-    We pull that name with Python (get_volume_name) and hand it to the LLM,
-    asking it to decide US vs International and record its answer by creating
-    either region-U.txt or region-I.txt on the root of the drive (contents = the
-    drive name). The region file is intentionally left in place here;
-    process_empty_drive removes it after the base files have been copied.
-    """
-    status_mgr.update(status_number=8)
-    logging.info("--- Starting Region Classification (by drive name) ---")
-
-    # Find the drive name in Python and feed it to the LLM via the prompt.
-    drive_name = get_volume_name(drive_path)
-    logging.info(f"Drive name used for region classification: '{drive_name}'")
-
-    # ========================================================================
-    # LLM PROMPT FOR REGION CLASSIFICATION (BY DRIVE NAME)
-    # ========================================================================
-    # The LLM runs with 'drive_path' as its working directory (the root of the
-    # drive being processed). [DRIVE] is replaced with the drive name above.
-    prompt = (
-        "Your task is to identify if this drive is intended to be used by a customer inside the US or outside the US. "
-        f"The name of the drive is {drive_name} and that should serve as your best hint. "
-        "Below are a couple of drive names and their regions to serve as examples:\n"
-        "BasinElectric -> US (we can tell this since Basin Electric is the name of a US utility company).\n"
-        "CalNatGuard -> US (since it's california's national guard this is obvious)\n"
-        "SwedishNP -> International (again it says Swedish so you can figure it out)\n"
-        "NMGameFish -> US (NM stands for New Mexico)\n\n"
-        "Some will be tricky and only be companies and some will be more clear. Once you have identified the region "
-        "you will create a new file at the root of this drive called either region-I.txt (for international) or "
-        "region-U.txt (for US). DO NOT CREATE ANY OTHER FILES WITH ANY OTHER NAMES! The contents of the text file "
-        "should be just the drive name. "
-    )
-    # ========================================================================
-
-    logging.info(f"Sending prompt to LLM: '{prompt}'")
-    llm_instance.useLoc(prompt, drive_path)
-
-    # The LLM signals the region by creating region-U.txt or region-I.txt on the
-    # root of the drive. Detect which one it made and record it in workVars.
-    region_u_path = os.path.join(drive_path, "region-U.txt")
-    region_i_path = os.path.join(drive_path, "region-I.txt")
-
-    region_determined = None
-    if os.path.exists(region_u_path):
-        region_determined = "U"
-    elif os.path.exists(region_i_path):
-        region_determined = "I"
-
-    if region_determined:
-        logging.info(f"LLM created region file. Region is: {region_determined}")
-        work_vars.remove_row("Region")
-        work_vars.add_row("Region", region_determined)
-    else:
-        logging.warning("LLM failed to create region-U.txt or region-I.txt to indicate region.")
-
-    region_after = work_vars.get_data_by_name("Region")
-    logging.info(f"Region AFTER LLM processing: {region_after}")
-    logging.info("--- Finished Region Classification (by drive name) ---")
-
 def copy_region_files(drive_path, work_vars, status_number=3):
     """
-    Copies the appropriate files to the drive based on the identified region.
+    Copies the appropriate base files to the drive based on the identified region.
 
-    `status_number` lets callers reflect a distinct WebUI step: the normal build
-    reports step 3 ("Copying Base Files") while the empty-drive path reports
-    step 9 (its own base-files-only copy) via copy_base_files.
+    `status_number` lets callers reflect the WebUI step: both the full build
+    (process_drive) and the country-drive build (process_country_drive) report
+    step 3 ("Copying Base Files") here.
     """
     status_mgr.update(status_number=status_number)
     logging.info("--- Starting File Copy Process ---")
@@ -798,17 +854,85 @@ def copy_region_files(drive_path, work_vars, status_number=3):
 
     logging.info(f"--- Finished File Copy Process. Successfully copied {completedBaseFiles} out of {totalBaseFiles} items. ---")
 
-def copy_base_files(drive_path, work_vars):
-    """
-    Copies the regional base files for an empty drive (one with no packfiles.txt).
+# Source locations on the U drive for the country-specific file sets.
+COUNTRY_IMAGERY_SRC = r"U:\ARS\Data\imagery\GLOBAL\COUNTRIES"
+COUNTRY_VECTOR_SRC  = r"U:\ARS\Data\vector\Baseline"
+COUNTRY_GEOCODE_SRC = r"U:\ARS\Data\geocode"
 
-    This is the empty-drive counterpart to copy_region_files: it performs the very
-    same robocopy work, but reports its own WebUI status (step 9) so the user can
-    clearly see that an empty drive is only receiving its regional base files.
+def copy_country_files(drive_path, iso):
     """
-    logging.info("--- Starting Base File Copy Process (empty drive) ---")
-    copy_region_files(drive_path, work_vars, status_number=9)
-    logging.info("--- Finished Base File Copy Process (empty drive) ---")
+    Copies the three country-specific data sets for a non-US country drive,
+    keyed purely off the ISO Alpha-3 code (no LLM involved). Reports WebUI
+    step 8 ("Copying Country Files") and drives the progress bar via the
+    "main file" counters (TotalMainFiles/CompletedMainFiles), which country
+    drives do not otherwise use.
+
+    The three sets (DRIVE = the working drive root):
+      1. Imagery file(s)  U:\\ARS\\Data\\imagery\\GLOBAL\\COUNTRIES\\<iso>_*.esp
+                          ->  DRIVE\\ARS\\data\\imagery\\
+      2. Vector folder    U:\\ARS\\Data\\vector\\Baseline\\<iso>
+                          ->  DRIVE\\ARS\\data\\vector\\<iso>
+      3. Geocode folder   U:\\ARS\\Data\\geocode\\<iso>
+                          ->  DRIVE\\ARS\\data\\geocode\\<iso>
+    """
+    status_mgr.update(status_number=8)
+    iso_l = iso.lower()
+    logging.info(f"--- Starting Country-Specific File Copy for '{iso_l}' ---")
+
+    imagery_dst = os.path.join(drive_path, "ARS", "data", "imagery")
+    vector_dst  = os.path.join(drive_path, "ARS", "data", "vector")
+    geocode_dst = os.path.join(drive_path, "ARS", "data", "geocode")
+    for d in (imagery_dst, vector_dst, geocode_dst):
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception as e:
+            logging.error(f"Failed to create destination folder {d}: {e}")
+
+    commands = []
+
+    # 1. Imagery: copy every file in the COUNTRIES folder whose name starts with
+    #    "<iso>_" (e.g. can_s2_2021_10m.esp for Canada). Matched by code alone.
+    if os.path.isdir(COUNTRY_IMAGERY_SRC):
+        try:
+            for fn in os.listdir(COUNTRY_IMAGERY_SRC):
+                if fn.lower().startswith(iso_l + "_"):
+                    commands.append(["robocopy", COUNTRY_IMAGERY_SRC, imagery_dst, fn])
+        except Exception as e:
+            logging.error(f"Failed to list imagery source {COUNTRY_IMAGERY_SRC}: {e}")
+        if not any(c[1] == COUNTRY_IMAGERY_SRC for c in commands):
+            logging.warning(f"No imagery file found in {COUNTRY_IMAGERY_SRC} starting with '{iso_l}_'.")
+    else:
+        logging.error(f"Imagery COUNTRIES source not found: {COUNTRY_IMAGERY_SRC}")
+
+    # 2. Vector folder: U:\ARS\Data\vector\Baseline\<iso> -> DRIVE\ARS\data\vector\<iso>
+    vec_src = os.path.join(COUNTRY_VECTOR_SRC, iso_l)
+    commands.append(["robocopy", vec_src, os.path.join(vector_dst, iso_l), "/e"])
+
+    # 3. Geocode folder: U:\ARS\Data\geocode\<iso> -> DRIVE\ARS\data\geocode\<iso>
+    geo_src = os.path.join(COUNTRY_GEOCODE_SRC, iso_l)
+    commands.append(["robocopy", geo_src, os.path.join(geocode_dst, iso_l), "/e"])
+
+    totalMainFiles = len(commands)
+    completedMainFiles = 0
+    status_mgr.update(total_main=totalMainFiles, comp_main=0)
+    logging.info(f"Total country-specific items to copy (totalMainFiles): {totalMainFiles}")
+
+    for cmd in commands:
+        cmd_str = " ".join([f'"{x}"' if " " in x else x for x in cmd])
+        logging.info(f"Running command: {cmd_str}")
+        try:
+            # 0x08000000 is CREATE_NO_WINDOW
+            result = subprocess.run(cmd, capture_output=True, text=True, creationflags=0x08000000)
+            if result.returncode >= 8:
+                logging.error(f"Robocopy failed with exit code {result.returncode}: {result.stderr or result.stdout}")
+            else:
+                completedMainFiles += 1
+                status_mgr.update(comp_main=completedMainFiles)
+                logging.info(f"Robocopy completed with exit code {result.returncode}. Completed: {completedMainFiles}/{totalMainFiles}")
+        except Exception as e:
+            logging.error(f"Failed to execute robocopy command: {e}")
+
+    logging.info(f"--- Finished Country-Specific File Copy. Copied {completedMainFiles} of {totalMainFiles} items. ---")
 
 # Source location of the airport archive on the U drive.
 AIRPORT_ZIP_SOURCE = r"U:\ARS\Data\airport\airport.zip"
@@ -1180,12 +1304,14 @@ def process_drive(drive_path):
 
     logging.debug(f"Looking for packfiles.txt at: {packfiles_path}")
     
-    # Check if packfiles.txt exists on the root of the drive. If it is missing,
-    # this is an "empty" drive: rather than skip it, we hand off to the
-    # process_empty_drive workflow which copies only the regional base files.
+    # Check if packfiles.txt exists on the root of the drive. Drives WITHOUT a
+    # packfiles.txt never reach process_drive — the monitoring loop routes them
+    # to the country-drive flow (process_country_drive) only after the user
+    # supplies a name + country in the WebUI. This guard is purely defensive in
+    # case the file disappeared between detection and processing.
     if not os.path.exists(packfiles_path):
-        logging.info(f"packfiles.txt NOT FOUND on {drive_path}. Switching to empty-drive processing.")
-        return process_empty_drive(drive_path)
+        logging.info(f"packfiles.txt NOT FOUND on {drive_path}. Skipping this drive.")
+        return None
 
     logging.info(f"Found packfiles.txt on {drive_path}. Proceeding with processing.")
     status_mgr.update(status_number=1)
@@ -1241,35 +1367,75 @@ def process_drive(drive_path):
     return issues_found
 
 
-def process_empty_drive(drive_path):
+def format_drive(drive_path, label):
     """
-    Process a newly connected drive that has NO packfiles.txt on its root.
+    Quick-format the drive as NTFS and apply `label` as its volume name, using
+    PowerShell's Format-Volume. Returns True on success, False otherwise.
 
-    Whereas process_drive builds a full data drive, an "empty" drive only gets the
-    regional base files. Because there is no packfiles.txt to read the region from,
-    the region is inferred by the LLM from the drive's NAME (classifyRegionByName).
-    Once the base files are copied, BOTH dobDir and the region file the LLM created
-    are deleted, and the drive is reported as completed exactly like a normal build.
-
-    Returns False (no issues) on completion so the worker thread records it as a
-    completed drive, or True if the drive could not even be prepared.
+    This is destructive (it wipes the drive) and is only ever called on a
+    blank/country drive that the user explicitly named + confirmed in the WebUI.
     """
-    logging.info(f"========== Starting EMPTY-DRIVE processing for: {drive_path} ==========")
+    letter = drive_path[0]
+    safe_label = (label or "DRIVE")[:32].replace("'", "''")  # NTFS labels max 32 chars
+    logging.info(f"Formatting {letter}: as NTFS with label '{safe_label}' (quick format).")
+    cmd = [
+        "powershell",
+        "-NoProfile",
+        "-WindowStyle", "Hidden",
+        "-Command",
+        f"Format-Volume -DriveLetter {letter} -FileSystem NTFS "
+        f"-NewFileSystemLabel '{safe_label}' -Confirm:$false -Force",
+    ]
+    try:
+        # 0x08000000 is CREATE_NO_WINDOW
+        result = subprocess.run(cmd, capture_output=True, text=True, creationflags=0x08000000)
+        if result.returncode != 0:
+            logging.error(f"Format-Volume failed (rc={result.returncode}): {result.stderr or result.stdout}")
+            return False
+        logging.info(f"SUCCESS: Formatted {letter}: and applied label '{safe_label}'.")
+        return True
+    except Exception as e:
+        logging.error(f"Exception while formatting {letter}: {e}")
+        return False
+
+
+def process_country_drive(job):
+    """
+    Process a blank drive (one that arrived WITHOUT packfiles.txt) after the user
+    has supplied a Drive Name and Country in the WebUI.
+
+    Steps:
+      1. Quick-format the drive and apply the chosen name (status 9).
+      2. Determine the region purely from the chosen country: USA -> US ("u"),
+         anything else -> International ("i"). No LLM is involved.
+      3. Copy the regional base files (status 3, via copy_region_files).
+      4. If the country is NOT the US, copy the three country-specific data sets
+         (status 8, via copy_country_files).
+      5. Clean up dobDir and report the drive completed.
+
+    Returns False (no issues) on completion so the worker records it as a
+    completed drive, or True if the drive could not be prepared.
+    """
+    drive_path = job["path"]
+    iso = (job.get("iso") or "").upper()
+    name = job.get("name") or get_volume_name(drive_path)
+    logging.info(f"========== Starting COUNTRY-DRIVE processing for {drive_path} (name='{name}', iso='{iso}') ==========")
+
+    # 1. Format the drive and apply the chosen name.
+    status_mgr.update(status_number=9)
+    if not format_drive(drive_path, name):
+        logging.error("Formatting failed; continuing with the copy anyway.")
+
+    # 2. dobDir + workVars for the base copy (temporary files live in dobDir).
     status_mgr.update(status_number=1)
     dobdir_path = os.path.join(drive_path, "dobDir")
-
-    # Same dobDir lifecycle as process_drive: temporary work files (workVars.csv,
-    # the copy_files.bat reference) live in dobDir on the target drive.
     if os.path.exists(dobdir_path):
         logging.info(f"Directory {dobdir_path} already exists. Deleting it first...")
         try:
             shutil.rmtree(dobdir_path)
-            logging.info(f"SUCCESS: Deleted existing directory {dobdir_path}")
         except Exception as e:
             logging.error(f"FAILED to delete existing directory {dobdir_path}. Exception details: {e}")
             return True
-
-    logging.info(f"Attempting to create dobDir on {drive_path}...")
     try:
         os.makedirs(dobdir_path)
         logging.info(f"SUCCESS: Created directory {dobdir_path}")
@@ -1277,16 +1443,22 @@ def process_empty_drive(drive_path):
         logging.error(f"FAILED to create directory {dobdir_path}. Exception details: {e}")
         return True
 
-    # Initialize the workVars.csv file in the dobDir directory
-    workvars_path = os.path.join(dobdir_path, "workVars.csv")
-    work_vars = WorkVars(workvars_path)
+    work_vars = WorkVars(os.path.join(dobdir_path, "workVars.csv"))
 
-    # Identify the region from the drive's NAME, then copy the regional base files.
-    dobsy = LLM()
-    classifyRegionByName(dobsy, drive_path, work_vars)
-    copy_base_files(drive_path, work_vars)
+    # 3. Region straight from the country code.
+    region = "u" if iso == "USA" else "i"
+    work_vars.remove_row("Region")
+    work_vars.add_row("Region", region)
+    logging.info(f"Country '{iso}' maps to region '{region}'.")
 
-    # Clean up: remove dobDir AND the region file the LLM created on the root.
+    # 4. Copy the regional base files (US gets US set, others get the international set).
+    copy_region_files(drive_path, work_vars, status_number=3)
+
+    # 5. Non-US drives additionally get the country-specific files.
+    if region != "u":
+        copy_country_files(drive_path, iso)
+
+    # 6. Clean up the temporary dobDir.
     logging.info(f"Cleaning up {dobdir_path}...")
     try:
         shutil.rmtree(dobdir_path)
@@ -1294,16 +1466,7 @@ def process_empty_drive(drive_path):
     except Exception as e:
         logging.error(f"FAILED to delete directory {dobdir_path}. Exception details: {e}")
 
-    for region_file in ("region-U.txt", "region-I.txt"):
-        region_path = os.path.join(drive_path, region_file)
-        if os.path.exists(region_path):
-            try:
-                os.remove(region_path)
-                logging.info(f"SUCCESS: Deleted region file {region_path}")
-            except Exception as e:
-                logging.error(f"FAILED to delete region file {region_path}. Exception details: {e}")
-
-    logging.info(f"========== Finished EMPTY-DRIVE processing for {drive_path} ==========")
+    logging.info(f"========== Finished COUNTRY-DRIVE processing for {drive_path} ==========")
     return False
 
 
@@ -1457,13 +1620,13 @@ def drain_queue(drive_queue):
     return items
 
 
-def save_queue(drive_paths):
-    """Persist the not-yet-processed drives so they survive the update restart."""
+def save_queue(jobs):
+    """Persist the not-yet-processed job dicts so they survive the update restart."""
     try:
         os.makedirs(os.path.dirname(SAVED_QUEUE_FILE), exist_ok=True)
         with open(SAVED_QUEUE_FILE, "w", encoding="utf-8") as f:
-            json.dump(list(drive_paths), f)
-        logging.info(f"Saved {len(drive_paths)} queued drive(s) for post-update resume.")
+            json.dump(list(jobs), f)
+        logging.info(f"Saved {len(jobs)} queued drive(s) for post-update resume.")
     except Exception as e:
         logging.error(f"Failed to save drive queue to {SAVED_QUEUE_FILE}: {e}")
 
@@ -1525,30 +1688,119 @@ def trigger_update():
         logging.error(f"Failed to launch updater: {e}", exc_info=True)
 
 
+def handle_new_drive(drive, drive_queue):
+    """
+    Route a newly connected drive. Drives WITH packfiles.txt are queued for the
+    full build immediately. Drives WITHOUT it are registered as blank-awaiting so
+    the WebUI can prompt for a Drive Name + Country before anything happens.
+    """
+    size_tb = drive_size_tb(drive)
+    if os.path.exists(os.path.join(drive, "packfiles.txt")):
+        job = {
+            "path": drive,
+            "kind": "packfiles",
+            "name": get_volume_name(drive),
+            "sizeTB": size_tb,
+            "iso": None,
+        }
+        drive_manager.add_pending(job)
+        drive_queue.put(job)
+        plog.info(f"Drive {drive} has packfiles.txt -> queued for full build (name='{job['name']}', {size_tb}TB).")
+    else:
+        drive_manager.add_blank(drive, size_tb)
+        plog.info(f"Drive {drive} has no packfiles.txt -> awaiting user input in WebUI ({size_tb}TB).")
+
+
+def consume_submissions(drive_queue):
+    """
+    Consume any blank-drive submissions written by the companion API into
+    SUBMISSIONS_DIR. Each file is {token, name, country}. For each one still
+    matching a blank-awaiting drive, build a country job, register it pending,
+    and queue it for the worker (which formats + builds it).
+    """
+    if not os.path.isdir(SUBMISSIONS_DIR):
+        return
+    try:
+        entries = sorted(os.listdir(SUBMISSIONS_DIR))
+    except Exception as e:
+        plog.error(f"Failed to list submissions dir {SUBMISSIONS_DIR}: {e}")
+        return
+
+    for fname in entries:
+        fpath = os.path.join(SUBMISSIONS_DIR, fname)
+        if not os.path.isfile(fpath):
+            continue
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                sub = json.load(f)
+        except Exception as e:
+            plog.error(f"Failed to read submission {fpath}: {e}")
+            try:
+                os.remove(fpath)
+            except Exception:
+                pass
+            continue
+        # Consume the file regardless of outcome so it is never reprocessed.
+        try:
+            os.remove(fpath)
+        except Exception as e:
+            plog.error(f"Failed to delete submission {fpath}: {e}")
+
+        token = str(sub.get("token", "")).strip()
+        name = sanitize_drive_name(sub.get("name", ""))
+        iso = str(sub.get("country", "")).strip().upper()
+
+        if not (token and name and re.fullmatch(r"[A-Z]{3}", iso)):
+            plog.warning(f"Ignoring malformed submission: {sub}")
+            continue
+
+        match = drive_manager.pop_blank_by_token(token)
+        if not match:
+            plog.warning(f"Submission token {token} no longer matches a connected blank drive; ignoring.")
+            continue
+
+        job = {
+            "path": match["drive"],
+            "kind": "country",
+            "name": name,
+            "sizeTB": match["sizeTB"],
+            "iso": iso,
+        }
+        drive_manager.add_pending(job)
+        drive_queue.put(job)
+        plog.warning(f"Blank drive {match['drive']} submitted as '{name}' ({iso}) -> queued for build.")
+
+
 def worker_thread(drive_queue, status_mgr):
     logging.info("Worker thread started. Waiting for drives...")
     while True:
         try:
-            drive_path = drive_queue.get()
-            if drive_path is None:  # Shutdown signal
+            job = drive_queue.get()
+            if job is None:  # Shutdown signal
                 break
-                
-            vol_name = get_volume_name(drive_path)
-            logging.info(f"Worker picked up drive: {drive_path} (Name: {vol_name})")
-            
-            # process_drive updates status numbers during its execution (1, 2, 3, etc.)
-            had_issues = process_drive(drive_path)
-            
+
+            drive_path = job["path"]
+            kind = job.get("kind", "packfiles")
+            vol_name = job.get("name") or get_volume_name(drive_path)
+            drive_manager.start_job(job)
+            logging.info(f"Worker picked up drive: {drive_path} (Name: {vol_name}, kind: {kind})")
+
+            # Both processors update status numbers during their execution.
+            if kind == "country":
+                had_issues = process_country_drive(job)
+            else:
+                had_issues = process_drive(drive_path)
+
             if had_issues is not None:
                 # Add to completed drives
                 status_mgr.add_completed_drive(vol_name, had_issues)
-                
+
                 # Set final status for this drive
                 if had_issues:
                     status_mgr.update(status_number=11)
                 else:
                     status_mgr.update(status_number=10)
-                
+
                 # Eject the drive
                 logging.info(f"Ejecting drive {drive_path}...")
                 eject_drive(drive_path)
@@ -1614,16 +1866,24 @@ def main():
     known_drives = get_connected_drives()
     logging.info(f"Initial drives detected and added to ignore list: {', '.join(known_drives) if known_drives else 'None'}")
 
+    # Make sure the blank-drive submission inbox exists before we start polling.
+    try:
+        os.makedirs(SUBMISSIONS_DIR, exist_ok=True)
+    except Exception as e:
+        logging.error(f"Failed to create submissions dir {SUBMISSIONS_DIR}: {e}")
+
     # Resume any drives that were still queued when a scheduled update restarted
     # the program. They are enqueued directly (and marked known so the change
     # detector does not also re-add them).
-    for drive in load_saved_queue():
-        if os.path.exists(drive):
+    for job in load_saved_queue():
+        drive = job.get("path") if isinstance(job, dict) else None
+        if drive and os.path.exists(drive):
             known_drives.add(drive)
-            drive_queue.put(drive)
+            drive_manager.add_pending(job)
+            drive_queue.put(job)
             logging.info(f"Resuming queued drive after update restart: {drive}")
         else:
-            logging.info(f"Saved drive {drive} is no longer connected; skipping resume.")
+            logging.info(f"Saved drive {job} is no longer connected; skipping resume.")
 
     plog.info("Entering main monitoring loop. Waiting for new drives...")
 
@@ -1636,9 +1896,9 @@ def main():
             new_drives = current_drives - known_drives
             for drive in new_drives:
                 plog.warning(f"--- NEW DRIVE DETECTED: {drive} ---")
-                plog.debug(f"Adding {drive} to the internal ignore list and queue.")
+                plog.debug(f"Adding {drive} to the internal ignore list; classifying.")
                 known_drives.add(drive)
-                drive_queue.put(drive)
+                handle_new_drive(drive, drive_queue)
 
             # Find drives that were removed (in known but not in current)
             removed_drives = known_drives - current_drives
@@ -1646,7 +1906,13 @@ def main():
                 plog.warning(f"--- DRIVE REMOVED: {drive} ---")
                 plog.debug(f"Removing {drive} from the internal ignore list so it can be re-processed if inserted again.")
                 known_drives.remove(drive)
-                    
+                # If it was a blank drive still awaiting input, drop it so its
+                # popup disappears from the WebUI.
+                drive_manager.remove_blank_by_drive(drive)
+
+            # Consume any blank-drive submissions the WebUI posted via the API.
+            consume_submissions(drive_queue)
+
             # Reset status to 0 if no known drives are connected and queue is empty
             if not known_drives and drive_queue.empty():
                 current_state = status_mgr._read_data()

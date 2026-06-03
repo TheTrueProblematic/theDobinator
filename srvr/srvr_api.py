@@ -11,6 +11,8 @@ POST /power            -> launches dobWin.bat in a detached process; returns 200
 POST /update           -> launches configs/dobGitManual.bat to apply an update now
 POST /schedule-update  -> writes logs/update_scheduled.flag so dobd.py applies the
                           update once the current drive finishes processing
+POST /submit-drive     -> writes a blank-drive submission ({token,name,country})
+                          into logs/submissions/ for dobd.py to format + queue
 GET  /health           -> liveness check; returns 200 {"ok": true}
 *    *                 -> 404
 
@@ -23,8 +25,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from logging.handlers import RotatingFileHandler
 
@@ -38,6 +42,7 @@ DOB_BAT     = os.path.join(PROJECT_DIR, "dobWin.bat")
 UPDATE_BAT  = os.path.join(PROJECT_DIR, "configs", "dobGitManual.bat")
 LOGS_DIR    = os.path.join(PROJECT_DIR, "logs")
 UPDATE_SCHEDULED_FLAG = os.path.join(LOGS_DIR, "update_scheduled.flag")
+SUBMISSIONS_DIR = os.path.join(LOGS_DIR, "submissions")
 LOG_FILE    = os.path.join(SCRIPT_DIR, "srvr_api.log")
 
 HOST = os.environ.get("DOB_API_HOST", "0.0.0.0")
@@ -146,6 +151,35 @@ def schedule_update() -> tuple[bool, str]:
         return False, f"failed to schedule update: {exc!r}"
 
 
+_TOKEN_SAFE = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def submit_drive(body: dict) -> tuple[bool, str]:
+    """
+    Persist a blank-drive submission for dobd.py to pick up. Expects
+    {token, name, country}; writes logs/submissions/<safe-token>.json. dobd.py
+    re-validates and sanitizes everything, so this only does light checks.
+    """
+    token = str(body.get("token", "")).strip()
+    name = str(body.get("name", "")).strip()
+    country = str(body.get("country", "")).strip().upper()
+
+    if not token or not name or not re.fullmatch(r"[A-Z]{3}", country):
+        return False, "token, name, and a 3-letter country code are all required"
+
+    safe_token = _TOKEN_SAFE.sub("_", token)[:64] or "drive"
+    try:
+        os.makedirs(SUBMISSIONS_DIR, exist_ok=True)
+        # Unique filename per submission so a re-submit can't clobber a pending one.
+        fname = f"{safe_token}-{int(time.time() * 1000)}.json"
+        fpath = os.path.join(SUBMISSIONS_DIR, fname)
+        with open(fpath, "w", encoding="utf-8") as f:
+            json.dump({"token": token, "name": name, "country": country}, f)
+        return True, f"submission accepted ({fname})"
+    except Exception as exc:
+        return False, f"failed to write submission: {exc!r}"
+
+
 # ---------------------------------------------------------------------------
 # HTTP handler
 # ---------------------------------------------------------------------------
@@ -188,6 +222,21 @@ class PowerHandler(BaseHTTPRequestHandler):
             return
         self._send_json(404, {"ok": False, "error": "not found"})
 
+    def _read_json_body(self) -> dict:
+        """Read and parse a JSON request body; return {} on any problem."""
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            length = 0
+        if length <= 0:
+            return {}
+        try:
+            raw = self.rfile.read(length)
+            data = json.loads(raw.decode("utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
     def do_POST(self):
         path = self.path.split("?", 1)[0]
         if path == "/power":
@@ -204,6 +253,12 @@ class PowerHandler(BaseHTTPRequestHandler):
             ok, msg = schedule_update()
             logger.info("scheduled update requested: ok=%s msg=%s", ok, msg)
             self._send_json(200 if ok else 500, {"ok": ok, "message": msg})
+            return
+        if path == "/submit-drive":
+            body = self._read_json_body()
+            ok, msg = submit_drive(body)
+            logger.info("drive submission: ok=%s msg=%s", ok, msg)
+            self._send_json(200 if ok else 400, {"ok": ok, "message": msg})
             return
         self._send_json(404, {"ok": False, "error": "not found"})
 
