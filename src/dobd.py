@@ -71,6 +71,13 @@ GITHUB_API_URL = (
     f"https://api.github.com/repos/{GITHUB_REPO}/commits"
     f"?sha={GITHUB_BRANCH}&per_page=1"
 )
+# Contents API for the reboot-required flag file on the remote. When a new commit
+# is detected, the watcher reads this to decide whether the *incoming* update
+# needs a full PC restart (red update button) vs a normal update (yellow).
+GITHUB_FLAG_API_URL = (
+    f"https://api.github.com/repos/{GITHUB_REPO}/contents/configs/reboot_required.flag"
+    f"?ref={GITHUB_BRANCH}"
+)
 # How many 1-second drive-poll iterations between GitHub checks (~5 seconds).
 GITHUB_CHECK_EVERY = 5
 # How many 1-second poll iterations between full physical-disk scans (~2 seconds).
@@ -84,6 +91,9 @@ DISK_SCAN_EVERY = 2
 # the program refuses to run until the key has been filled in.
 CONFIGS_DIR = os.path.join(PROJECT_ROOT, "configs")
 KEYS_FILE = os.path.join(CONFIGS_DIR, "keys.json")
+# Committed flag (1/0) marking whether the published update needs a PC reboot.
+# Agents set it per AGENTS.md; git_update.py --reboot clears it after applying.
+REBOOT_FLAG_FILE = os.path.join(CONFIGS_DIR, "reboot_required.flag")
 GITLOG_FILE = os.path.join(LOGS_DIR, "gitLog.log")
 GITHUB_PAT_LABEL = "GITHUB_PAT"
 KEYS_FILE_TEMPLATE = {
@@ -231,6 +241,7 @@ class StatusManager:
             "BlankDrives": [],
             "PendingDrives": [],
             "UpdateAvailable": 0,
+            "RebootRequired": 0,
             "Running": 1
         }
         if os.path.exists(self.filepath):
@@ -276,6 +287,15 @@ class StatusManager:
             new_val = 1 if available else 0
             if data.get("UpdateAvailable", 0) != new_val:
                 data["UpdateAvailable"] = new_val
+                self._write_data(data)
+
+    def set_reboot_required(self, required):
+        """Flip the WebUI 'this update needs a PC restart' indicator (red button)."""
+        with self._lock:
+            data = self._read_data()
+            new_val = 1 if required else 0
+            if data.get("RebootRequired", 0) != new_val:
+                data["RebootRequired"] = new_val
                 self._write_data(data)
 
     def set_drive_lists(self, blank_drives, pending_drives):
@@ -688,6 +708,19 @@ class LLM:
             except Exception:
                 pass
 
+
+
+def is_admin():
+    """
+    True if this process is running elevated (administrator). Disk formatting
+    (Clear-Disk/Initialize-Disk/Format-Volume) and `shutdown /r` require this, so
+    we log it loudly at startup to make a missing-elevation misconfiguration easy
+    to diagnose.
+    """
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
 
 
 def get_connected_drives():
@@ -1647,6 +1680,12 @@ class UpdateWatcher:
                     self.update_available = True
                     self.status_mgr.set_update_available(True)
                     plog.warning("A new version of theDobinator is available on GitHub.")
+                    # Decide whether this incoming update needs a full PC restart
+                    # by reading the remote reboot-required flag.
+                    reboot = self._fetch_reboot_required()
+                    self.status_mgr.set_reboot_required(reboot)
+                    if reboot:
+                        plog.warning("The available update is flagged as REQUIRING A PC RESTART.")
         except urllib.error.HTTPError as e:
             if e.code == 304:
                 plog.debug("GitHub update check: 304 Not Modified (up to date).")
@@ -1655,10 +1694,41 @@ class UpdateWatcher:
         except Exception as e:
             plog.debug(f"GitHub update check network error (non-fatal): {e}")
 
+    def _fetch_reboot_required(self):
+        """
+        Read the remote configs/reboot_required.flag via the GitHub contents API
+        (raw media type) and return True if it indicates a reboot is required.
+        Fails safe to False (yellow button) on any error.
+        """
+        try:
+            req = urllib.request.Request(GITHUB_FLAG_API_URL)
+            req.add_header("Authorization", f"Bearer {self.github_pat}")
+            req.add_header("Accept", "application/vnd.github.raw")
+            req.add_header("X-GitHub-Api-Version", "2022-11-28")
+            req.add_header("User-Agent", "TheDobinator-UpdateWatcher")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                content = resp.read().decode("utf-8", errors="replace").strip().lower()
+            return content in ("1", "true", "yes")
+        except Exception as e:
+            plog.debug(f"Could not read remote reboot flag (assuming no reboot needed): {e}")
+            return False
+
 
 def is_update_scheduled():
     """True if the user asked (via the WebUI) to apply an update after the current drive."""
     return os.path.exists(UPDATE_SCHEDULED_FLAG)
+
+
+def scheduled_update_is_reboot():
+    """
+    True if the scheduled update is a reboot-update (the API wrote 'reboot' into
+    the flag file). Any other content means a normal restart-the-bot update.
+    """
+    try:
+        with open(UPDATE_SCHEDULED_FLAG, "r", encoding="utf-8") as f:
+            return f.read().strip().lower() == "reboot"
+    except Exception:
+        return False
 
 
 def clear_update_scheduled():
@@ -1712,18 +1782,20 @@ def load_saved_queue():
     return items if isinstance(items, list) else []
 
 
-def trigger_update():
+def trigger_update(reboot=False):
     """
     Launch the git updater detached. git_update.py shuts this program down via
-    quit.bat, pulls the new code, then restarts it via dobWin.bat. The updater
-    is started in its own detached process group so it is NOT killed when this
-    program is terminated.
+    quit.bat, pulls the new code, then either restarts it via dobWin.bat (normal)
+    or — when reboot=True — clears the reboot flag and restarts the whole PC
+    (git_update.py --reboot). The updater is started in its own detached process
+    group so it is NOT killed when this program is terminated.
     """
     updater = os.path.join(PROJECT_ROOT, "configs", "git_updater", "git_update.py")
     if not os.path.exists(updater):
         logging.error(f"Cannot apply scheduled update: {updater} not found.")
         return
-    logging.info(f"Launching scheduled update via {updater}")
+    args = [sys.executable, updater] + (["--reboot"] if reboot else [])
+    logging.info(f"Launching {'reboot-' if reboot else ''}update via {updater}")
     try:
         if os.name == "nt":
             DETACHED_PROCESS = 0x00000008
@@ -1731,7 +1803,7 @@ def trigger_update():
             CREATE_NO_WINDOW = 0x08000000
             flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
             subprocess.Popen(
-                [sys.executable, updater],
+                args,
                 cwd=PROJECT_ROOT,
                 creationflags=flags,
                 stdin=subprocess.DEVNULL,
@@ -1741,7 +1813,7 @@ def trigger_update():
             )
         else:
             subprocess.Popen(
-                [sys.executable, updater],
+                args,
                 cwd=PROJECT_ROOT,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
@@ -1995,11 +2067,12 @@ def worker_thread(drive_queue, status_mgr):
             # stops and restarts this program). The saved queue is re-enqueued
             # automatically on the next startup.
             if is_update_scheduled():
-                logging.warning("Scheduled update detected; applying now that the current drive is done.")
+                reboot = scheduled_update_is_reboot()
+                logging.warning(f"Scheduled {'reboot-' if reboot else ''}update detected; applying now that the current drive is done.")
                 remaining = drain_queue(drive_queue)
                 save_queue(remaining)
                 clear_update_scheduled()
-                trigger_update()
+                trigger_update(reboot=reboot)
                 logging.info("Updater launched; worker thread exiting to await program restart.")
                 return
         except Exception as e:
@@ -2027,10 +2100,21 @@ def main():
     # view and clear any stale update indicator so a fresh launch starts clean.
     status_mgr.update(status_number=0, running=1)
     status_mgr.set_update_available(False)
+    status_mgr.set_reboot_required(False)
     status_mgr.refresh_completed_drives()
     # Wipe any blank/pending drive lists left over in status.json by a previous
     # run or a hard reboot, so a stale popup can never survive a restart.
     drive_manager.reset()
+
+    # Elevation matters: disk formatting and shutdown/reboot need admin rights.
+    if is_admin():
+        logging.info("Running elevated (administrator). Disk formatting + reboot are available.")
+    else:
+        logging.warning(
+            "NOT elevated (administrator). Disk formatting (Clear-Disk/Format-Volume) and reboot "
+            "updates WILL FAIL. Set the 'Dobinator Web API' scheduled task to 'Run with highest "
+            "privileges' so the bot it launches inherits admin rights. See AGENTS.md section 5."
+        )
     logging.info("Starting dobd.py drive monitor program...")
 
     drive_queue = queue.Queue()

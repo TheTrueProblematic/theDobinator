@@ -11,6 +11,9 @@ POST /power            -> launches dobWin.bat in a detached process; returns 200
 POST /update           -> launches configs/dobGitManual.bat to apply an update now
 POST /schedule-update  -> writes logs/update_scheduled.flag so dobd.py applies the
                           update once the current drive finishes processing
+POST /update-reboot    -> launches git_update.py --reboot now (pull, clear flag,
+                          restart the whole PC); for updates that need a reboot
+POST /schedule-update-reboot -> schedules a reboot-update for after the current drive
 POST /submit-drive     -> writes a blank-drive submission ({token,name,country})
                           into logs/submissions/ for dobd.py to format + queue
 GET  /health           -> liveness check; returns 200 {"ok": true}
@@ -138,18 +141,62 @@ def trigger_update_now() -> tuple[bool, str]:
     return _launch_bat_detached(UPDATE_BAT)
 
 
-def schedule_update() -> tuple[bool, str]:
+def trigger_update_reboot_now() -> tuple[bool, str]:
     """
-    Write the scheduled-update flag so dobd.py applies the update once the
-    drive it is currently processing finishes.
+    Apply a reboot-required update immediately: launch git_update.py --reboot
+    detached. That script stops the bot, pulls the new code, clears the
+    reboot-required flag, then restarts the whole PC.
     """
+    updater = os.path.join(PROJECT_DIR, "configs", "git_updater", "git_update.py")
+    if not os.path.isfile(updater):
+        return False, f"git_update.py not found at {updater}"
+    try:
+        if os.name == "nt":
+            DETACHED_PROCESS = 0x00000008
+            CREATE_NEW_PROCESS_GROUP = 0x00000200
+            CREATE_NO_WINDOW = 0x08000000
+            flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+            subprocess.Popen(
+                [sys.executable, updater, "--reboot"],
+                cwd=PROJECT_DIR,
+                creationflags=flags,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+            )
+        else:
+            subprocess.Popen(
+                [sys.executable, updater, "--reboot"],
+                cwd=PROJECT_DIR,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+            )
+        return True, "reboot-update launched (git_update.py --reboot)"
+    except Exception as exc:
+        return False, f"failed to launch reboot update: {exc!r}"
+
+
+def _write_schedule_flag(content: str) -> tuple[bool, str]:
     try:
         os.makedirs(LOGS_DIR, exist_ok=True)
         with open(UPDATE_SCHEDULED_FLAG, "w", encoding="utf-8") as f:
-            f.write("scheduled")
-        return True, "update scheduled for after current drive"
+            f.write(content)
+        return True, f"update scheduled for after current drive ({content})"
     except Exception as exc:
         return False, f"failed to schedule update: {exc!r}"
+
+
+def schedule_update() -> tuple[bool, str]:
+    """Schedule a normal update for once the current drive finishes."""
+    return _write_schedule_flag("scheduled")
+
+
+def schedule_update_reboot() -> tuple[bool, str]:
+    """Schedule a reboot-required update for once the current drive finishes."""
+    return _write_schedule_flag("reboot")
 
 
 _TOKEN_SAFE = re.compile(r"[^A-Za-z0-9_-]")
@@ -253,6 +300,16 @@ class PowerHandler(BaseHTTPRequestHandler):
         if path == "/schedule-update":
             ok, msg = schedule_update()
             logger.info("scheduled update requested: ok=%s msg=%s", ok, msg)
+            self._send_json(200 if ok else 500, {"ok": ok, "message": msg})
+            return
+        if path == "/update-reboot":
+            ok, msg = trigger_update_reboot_now()
+            logger.info("immediate reboot-update requested: ok=%s msg=%s", ok, msg)
+            self._send_json(200 if ok else 500, {"ok": ok, "message": msg})
+            return
+        if path == "/schedule-update-reboot":
+            ok, msg = schedule_update_reboot()
+            logger.info("scheduled reboot-update requested: ok=%s msg=%s", ok, msg)
             self._send_json(200 if ok else 500, {"ok": ok, "message": msg})
             return
         if path == "/submit-drive":

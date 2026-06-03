@@ -55,8 +55,33 @@ logging.basicConfig(
 )
 
 MAIN_LOG_FILE = os.path.join(PROJECT_ROOT, "logs", "gitLog.log")
+REBOOT_FLAG_FILE = os.path.join(CONFIGS_DIR, "reboot_required.flag")
 
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+
+
+def clear_reboot_flag():
+    """Set configs/reboot_required.flag back to 0 after a reboot-update is applied."""
+    try:
+        with open(REBOOT_FLAG_FILE, "w", encoding="utf-8") as f:
+            f.write("0\n")
+        logging.info("Cleared reboot_required.flag (set to 0).")
+    except Exception as e:
+        logging.error(f"Could not clear reboot_required.flag: {e}")
+
+
+def reboot_pc():
+    """Restart the whole PC (used for updates that require a reboot to take effect)."""
+    logging.info("Initiating PC restart for reboot-required update.")
+    log_event("Reboot-update applied; restarting the PC.")
+    try:
+        subprocess.run(
+            ["shutdown", "/r", "/t", "10", "/c", "The Dobinator is applying an update that requires a restart."],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=30, creationflags=CREATE_NO_WINDOW,
+        )
+    except Exception as e:
+        logging.critical(f"Failed to invoke shutdown /r: {e}", exc_info=True)
 
 
 def log_event(message):
@@ -397,9 +422,9 @@ def do_git_update(git_exe):
     return before_sha, final_sha
 
 
-def do_update():
+def do_update(reboot=False):
     logging.info("=" * 64)
-    logging.info(f"git_update.py starting at {datetime.datetime.now().isoformat()}")
+    logging.info(f"git_update.py starting at {datetime.datetime.now().isoformat()} (reboot={reboot})")
     logging.info(f"SCRIPT_DIR    = {SCRIPT_DIR}")
     logging.info(f"CONFIGS_DIR   = {CONFIGS_DIR}")
     logging.info(f"PROJECT_ROOT  = {PROJECT_ROOT}")
@@ -437,13 +462,20 @@ def do_update():
         logging.critical(f"Update failed: {e}", exc_info=True)
         log_event(f"Update failed: {e}")
     finally:
-        logging.info("Restarting the program via dobWin.bat.")
-        startup_program()
-        logging.info("git_update.py finished.")
+        if reboot:
+            # Reboot-required update: clear the local flag and restart the whole
+            # PC instead of just relaunching the bot.
+            clear_reboot_flag()
+            reboot_pc()
+            logging.info("git_update.py finished (reboot path).")
+        else:
+            logging.info("Restarting the program via dobWin.bat.")
+            startup_program()
+            logging.info("git_update.py finished.")
 
 
 if __name__ == "__main__":
     try:
-        do_update()
+        do_update(reboot=("--reboot" in sys.argv[1:]))
     except Exception as e:
         logging.critical(f"Unhandled exception in git_update.py: {e}", exc_info=True)

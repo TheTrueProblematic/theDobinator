@@ -1,7 +1,7 @@
 // Top-level controller: polls status.json, hands off to render.js,
 // wires up the power button (which calls the companion API and re-polls fast).
 
-import { fetchStatus, togglePower, applyUpdate, scheduleUpdate, submitDrive } from './api.js';
+import { fetchStatus, togglePower, applyUpdate, scheduleUpdate, applyUpdateReboot, scheduleUpdateReboot, submitDrive } from './api.js';
 import { render } from './render.js';
 import { COUNTRIES } from './countries.js';
 
@@ -90,17 +90,43 @@ function closeUpdateModal() {
   document.getElementById('updateModal')?.classList.add('hidden');
 }
 
+// True when the available update is flagged as requiring a full PC restart.
+function isRebootUpdate() {
+  const s = lastState;
+  return !!(s && (s.RebootRequired === 1 || s.RebootRequired === true));
+}
+
+// Reword the "can't update while processing" modal for the reboot case.
+function setUpdateModalCopy(reboot) {
+  const title = document.querySelector('#updateModal .modal-title');
+  const body = document.querySelector('#updateModal .modal-body .subline');
+  const scheduleBtn = document.getElementById('scheduleUpdateBtn');
+  if (title) title.textContent = reboot ? 'Restart Required' : 'Update Available';
+  if (body) {
+    body.textContent = reboot
+      ? 'This update requires restarting the PC, which can’t happen while a drive is processing. Schedule it to update + restart once processing completes?'
+      : 'Update cannot be applied while drives are processing. Would you like to schedule this update for when processing completes?';
+  }
+  if (scheduleBtn) scheduleBtn.textContent = reboot ? 'Schedule restart' : 'Schedule';
+}
+
 async function handleUpdateClick() {
+  const reboot = isRebootUpdate();
   if (isProcessing()) {
     // Can't update mid-process — offer to schedule it for when the drive is done.
+    setUpdateModalCopy(reboot);
     document.getElementById('updateModal')?.classList.remove('hidden');
     return;
   }
-  // Idle: apply the update immediately.
+  // Idle: apply immediately. A reboot-update needs explicit confirmation since
+  // it restarts the whole machine.
+  if (reboot && !confirm('This update requires restarting the PC.\n\nUpdate now and restart the computer?')) {
+    return;
+  }
   if (updateInFlight) return;
   updateInFlight = true;
   try {
-    await applyUpdate();
+    await (reboot ? applyUpdateReboot() : applyUpdate());
   } catch (err) {
     console.error('[Dobinator] apply update failed:', err);
     alert(
@@ -116,7 +142,7 @@ async function handleScheduleUpdate() {
   if (updateInFlight) return;
   updateInFlight = true;
   try {
-    await scheduleUpdate();
+    await (isRebootUpdate() ? scheduleUpdateReboot() : scheduleUpdate());
     closeUpdateModal();
   } catch (err) {
     console.error('[Dobinator] schedule update failed:', err);

@@ -226,6 +226,13 @@ export function render(state, prev) {
     const updateReady = state.UpdateAvailable === 1 || state.UpdateAvailable === true;
     const showUpdate = state.Running === 1 && updateReady;
     updateBtn.classList.toggle('is-visible', showUpdate);
+    // A reboot-required update turns the button red and changes its hover label.
+    const rebootReady = state.RebootRequired === 1 || state.RebootRequired === true;
+    const showReboot = showUpdate && rebootReady;
+    updateBtn.classList.toggle('is-reboot', showReboot);
+    const label = showReboot ? 'Restart required' : 'Update available';
+    updateBtn.setAttribute('title', label);
+    updateBtn.setAttribute('aria-label', showReboot ? 'Apply update and restart PC' : 'Apply available update');
   }
 
   // Pending + blank drive lists only make sense while the bot is running. When

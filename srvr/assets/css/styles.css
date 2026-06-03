@@ -204,6 +204,23 @@ html, body {
   50%      { box-shadow: 0 0 0 6px color-mix(in srgb, var(--warning) 0%, transparent); }
 }
 
+/* Reboot-required update: red instead of yellow, with a matching red pulse. */
+.update-btn.is-reboot {
+  border-color: var(--danger);
+  color: var(--danger);
+  animation: rebootPulse 2.4s ease-in-out infinite;
+}
+.update-btn.is-reboot:hover {
+  background: var(--danger);
+  color: #ffffff;
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--danger) 35%, transparent);
+}
+
+@keyframes rebootPulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--danger) 50%, transparent); }
+  50%      { box-shadow: 0 0 0 6px color-mix(in srgb, var(--danger) 0%, transparent); }
+}
+
 .power-btn.is-busy { pointer-events: none; opacity: .7; }
 .power-btn.is-busy svg { animation: spin 1s linear infinite; }
 

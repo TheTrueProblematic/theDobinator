@@ -15,6 +15,7 @@ const DEFAULT_STATE = Object.freeze({
   BlankDrives: [],
   PendingDrives: [],
   UpdateAvailable: 0,
+  RebootRequired: 0,
 });
 
 export const ERROR_STATE = Object.freeze({
@@ -28,6 +29,7 @@ export const ERROR_STATE = Object.freeze({
   BlankDrives: [],
   PendingDrives: [],
   UpdateAvailable: 0,
+  RebootRequired: 0,
   _error: true,
 });
 
@@ -67,6 +69,16 @@ export async function applyUpdate() {
 // Schedule an available update to be applied once the current drive finishes.
 export async function scheduleUpdate() {
   return postToApi('/schedule-update');
+}
+
+// Apply a reboot-required update now (pull, clear flag, restart the PC).
+export async function applyUpdateReboot() {
+  return postToApi('/update-reboot');
+}
+
+// Schedule a reboot-required update for once the current drive finishes.
+export async function scheduleUpdateReboot() {
+  return postToApi('/schedule-update-reboot');
 }
 
 // Submit a blank drive's user-supplied Drive Name + Country (ISO Alpha-3).

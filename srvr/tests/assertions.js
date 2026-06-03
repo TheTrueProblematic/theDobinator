@@ -273,6 +273,42 @@ export const ASSERTIONS = [
   },
 
   {
+    name: 'Update available (no reboot) shows yellow update button, not red',
+    state: { Running: 1, StatusNumber: 0, UpdateAvailable: 1, RebootRequired: 0 },
+    check(doc) {
+      const b = $(doc, '#updateBtn');
+      if (!b) return fail('update button missing');
+      if (!b.classList.contains('is-visible')) return fail('update button should be visible');
+      if (b.classList.contains('is-reboot')) return fail('should NOT be red when no reboot required');
+      if (!/update available/i.test(b.getAttribute('title') || '')) return fail('expected "Update available" title');
+      return ok();
+    },
+  },
+
+  {
+    name: 'Reboot-required update shows red button with "Restart required"',
+    state: { Running: 1, StatusNumber: 0, UpdateAvailable: 1, RebootRequired: 1 },
+    check(doc) {
+      const b = $(doc, '#updateBtn');
+      if (!b) return fail('update button missing');
+      if (!b.classList.contains('is-visible')) return fail('update button should be visible');
+      if (!b.classList.contains('is-reboot')) return fail('expected red is-reboot class');
+      if (!/restart required/i.test(b.getAttribute('title') || '')) return fail('expected "Restart required" title');
+      return ok();
+    },
+  },
+
+  {
+    name: 'Update button hidden when not running even if update available',
+    state: { Running: 0, StatusNumber: 0, UpdateAvailable: 1, RebootRequired: 1 },
+    check(doc) {
+      const b = $(doc, '#updateBtn');
+      if (b && b.classList.contains('is-visible')) return fail('update button should be hidden when stopped');
+      return ok();
+    },
+  },
+
+  {
     name: 'Power button is always present in topbar',
     state: { Running: 1, StatusNumber: 0 },
     check(doc) {
