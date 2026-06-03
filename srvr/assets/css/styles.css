@@ -108,7 +108,7 @@ html, body {
   gap: 1rem;
 }
 
-.power-btn, .history-btn, .update-btn, .pending-btn {
+.power-btn, .history-btn, .update-btn, .pending-btn, .name-drive-btn {
   width: 48px;
   height: 48px;
   border-radius: 50%;
@@ -127,20 +127,36 @@ html, body {
   position: relative;
 }
 
-.power-btn:hover, .history-btn:hover, .pending-btn:hover {
+.power-btn:hover, .history-btn:hover, .pending-btn:hover, .name-drive-btn:hover {
   transform: translateY(-2px) scale(1.05);
   background: var(--fg);
   color: var(--bg);
   box-shadow: 0 6px 18px rgba(0,0,0,.18);
 }
 
-.power-btn:active, .history-btn:active, .update-btn:active, .pending-btn:active { transform: translateY(0) scale(.97); }
+.power-btn:active, .history-btn:active, .update-btn:active, .pending-btn:active, .name-drive-btn:active { transform: translateY(0) scale(.97); }
 
-.power-btn svg, .history-btn svg, .update-btn svg, .pending-btn svg {
+.power-btn svg, .history-btn svg, .update-btn svg, .pending-btn svg, .name-drive-btn svg {
   width: 20px;
   height: 20px;
   display: block;
 }
+
+/* ---------- "Name pending drives" button (shown only when blank drives await) ---------- */
+
+.name-drive-btn {
+  display: none;            /* hidden by default; shown via .is-visible */
+  border-color: var(--success);
+  color: var(--success);
+  animation: powerOnPulse 3.2s ease-in-out infinite;
+}
+.name-drive-btn.is-visible { display: inline-flex; }
+.name-drive-btn:hover {
+  background: var(--success);
+  border-color: var(--success);
+  color: #ffffff;
+}
+.name-drive-btn:hover .pending-count { background: var(--bg); color: var(--fg); }
 
 /* ---------- Pending-drives button + count badge ---------- */
 

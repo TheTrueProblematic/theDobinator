@@ -429,6 +429,26 @@ class DriveManager:
             if len(self._pending) != before:
                 self._publish()
 
+    def remove_pending_by_drive(self, drive):
+        """Drop any queued (not-yet-started) job for a drive that was unplugged."""
+        with self._lock:
+            before = len(self._pending)
+            self._pending = [j for j in self._pending if j.get("path") != drive]
+            if len(self._pending) != before:
+                self._publish()
+
+    def reset(self):
+        """
+        Clear all tracked drives and publish the empty lists. Called at startup so
+        stale BlankDrives/PendingDrives left in status.json by a previous run (or a
+        hard reboot) never resurrect a phantom popup. This honors the project's
+        ephemeral-state rule: drive state resets completely every launch.
+        """
+        with self._lock:
+            self._blank = []
+            self._pending = []
+            self._publish()
+
 
 drive_manager = DriveManager(status_mgr)
 
@@ -1783,6 +1803,18 @@ def worker_thread(drive_queue, status_mgr):
             kind = job.get("kind", "packfiles")
             vol_name = job.get("name") or get_volume_name(drive_path)
             drive_manager.start_job(job)
+
+            # If the drive was unplugged while it sat in the queue, drop it
+            # instead of processing a drive that is no longer there.
+            if not os.path.exists(drive_path):
+                logging.warning(f"Queued drive {drive_path} is no longer connected; skipping it.")
+                if drive_queue.empty():
+                    current_state = status_mgr._read_data()
+                    if current_state.get("StatusNumber", 0) not in [10, 11]:
+                        status_mgr.update(status_number=0)
+                drive_queue.task_done()
+                continue
+
             logging.info(f"Worker picked up drive: {drive_path} (Name: {vol_name}, kind: {kind})")
 
             # Both processors update status numbers during their execution.
@@ -1851,6 +1883,9 @@ def main():
     status_mgr.update(status_number=0, running=1)
     status_mgr.set_update_available(False)
     status_mgr.refresh_completed_drives()
+    # Wipe any blank/pending drive lists left over in status.json by a previous
+    # run or a hard reboot, so a stale popup can never survive a restart.
+    drive_manager.reset()
     logging.info("Starting dobd.py drive monitor program...")
 
     drive_queue = queue.Queue()
@@ -1906,9 +1941,12 @@ def main():
                 plog.warning(f"--- DRIVE REMOVED: {drive} ---")
                 plog.debug(f"Removing {drive} from the internal ignore list so it can be re-processed if inserted again.")
                 known_drives.remove(drive)
-                # If it was a blank drive still awaiting input, drop it so its
-                # popup disappears from the WebUI.
+                # Stop tracking an unplugged drive: drop it from the blank-awaiting
+                # list (so its popup disappears) and from the pending queue list (so
+                # it leaves the Pending Drives menu). A job already in the work queue
+                # is additionally skipped by the worker if the drive is gone.
                 drive_manager.remove_blank_by_drive(drive)
+                drive_manager.remove_pending_by_drive(drive)
 
             # Consume any blank-drive submissions the WebUI posted via the API.
             consume_submissions(drive_queue)
@@ -1932,7 +1970,11 @@ def main():
     except Exception as e:
         plog.critical(f"An unexpected error occurred in the main loop: {e}", exc_info=True)
     finally:
+        # On a graceful exit, mark stopped and clear the drive lists so the WebUI
+        # shows nothing pending. (A force-kill via quit.bat won't reach this, but
+        # the WebUI also suppresses these lists whenever Running != 1.)
         status_mgr.update(running=0)
+        status_mgr.set_drive_lists([], [])
 
 if __name__ == "__main__":
     main()

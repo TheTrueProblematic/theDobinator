@@ -23,6 +23,13 @@
         The Dobinator
       </span>
       <div class="topbar-actions">
+        <button id="nameDriveBtn" class="name-drive-btn" aria-label="Name pending drives" title="Drives waiting to be named">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/>
+            <line x1="7" y1="7" x2="7.01" y2="7"/>
+          </svg>
+          <span id="nameDriveCount" class="pending-count" aria-hidden="true"></span>
+        </button>
         <button id="pendingBtn" class="pending-btn" aria-label="View Pending Drives" title="View Pending Drives">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <circle cx="12" cy="12" r="9"/>

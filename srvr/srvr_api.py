@@ -43,6 +43,7 @@ UPDATE_BAT  = os.path.join(PROJECT_DIR, "configs", "dobGitManual.bat")
 LOGS_DIR    = os.path.join(PROJECT_DIR, "logs")
 UPDATE_SCHEDULED_FLAG = os.path.join(LOGS_DIR, "update_scheduled.flag")
 SUBMISSIONS_DIR = os.path.join(LOGS_DIR, "submissions")
+STATUS_FILE = os.path.join(SCRIPT_DIR, "status.json")
 LOG_FILE    = os.path.join(SCRIPT_DIR, "srvr_api.log")
 
 HOST = os.environ.get("DOB_API_HOST", "0.0.0.0")
@@ -267,9 +268,63 @@ class PowerHandler(BaseHTTPRequestHandler):
 # Entrypoint
 # ---------------------------------------------------------------------------
 
+def _is_dobd_running() -> bool:
+    """True if a python/pythonw process is currently running dobd.py (Windows only)."""
+    if os.name != "nt":
+        return False
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "$p = Get-CimInstance Win32_Process -Filter "
+             "\"Name = 'python.exe' OR Name = 'pythonw.exe'\" | "
+             "Where-Object { $_.CommandLine -match 'dobd.py' }; "
+             "if ($p) { exit 0 } else { exit 1 }"],
+            creationflags=0x08000000,  # CREATE_NO_WINDOW
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return proc.returncode == 0
+    except Exception as exc:
+        logger.info("could not determine if dobd.py is running: %r", exc)
+        return False
+
+
+def reset_status_if_bot_down() -> None:
+    """
+    On startup (typically the logon that follows a reboot), if the main bot is
+    NOT running, scrub the transient fields in status.json so the WebUI doesn't
+    resurrect a stale popup / pending list / "running" state that a hard reboot
+    froze in place. The bot rewrites these the moment it starts, so this is safe.
+    """
+    if _is_dobd_running():
+        logger.info("dobd.py is already running; leaving status.json untouched.")
+        return
+    if not os.path.isfile(STATUS_FILE):
+        return
+    try:
+        with open(STATUS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            data = {}
+        data["Running"] = 0
+        data["StatusNumber"] = 0
+        data["BlankDrives"] = []
+        data["PendingDrives"] = []
+        data["TotalBaseFiles"] = -1
+        data["CompletedBaseFiles"] = -1
+        data["TotalMainFiles"] = -1
+        data["CompletedMainFiles"] = -1
+        with open(STATUS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+        logger.info("dobd.py not running at API startup; reset transient status.json fields.")
+    except Exception as exc:
+        logger.info("could not reset status.json at startup: %r", exc)
+
+
 def main():
     logger.info("dob_srvr_api starting on %s:%d (project=%s)", HOST, PORT, PROJECT_DIR)
     logger.info("dobWin.bat path: %s (exists=%s)", DOB_BAT, os.path.isfile(DOB_BAT))
+    reset_status_if_bot_down()
     server = ThreadingHTTPServer((HOST, PORT), PowerHandler)
     try:
         server.serve_forever()

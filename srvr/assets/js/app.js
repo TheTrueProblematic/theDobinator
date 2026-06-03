@@ -23,6 +23,10 @@ let driveSubmitInFlight = false;
 // the popup is currently showing, ensuring popups appear strictly one at a time.
 const dismissedTokens = new Set();
 let currentPromptToken = null;
+// Set when the user closes the popup via its X (to reach the power button, etc.)
+// without naming the drive. While true the popup won't auto-reopen; the topbar
+// "name drives" button clears it to bring the popup back.
+let promptHiddenByUser = false;
 
 async function poll() {
   const state = await fetchStatus();
@@ -179,9 +183,32 @@ function closeDrivePrompt() {
   currentPromptToken = null;
 }
 
+// Close the popup without naming the drive (the X button). Keeps the drive in
+// the awaiting list so it can be reopened; suppresses auto-reopen until the
+// user clicks the "name drives" button.
+function closeDrivePromptManually() {
+  promptHiddenByUser = true;
+  closeDrivePrompt();
+}
+
+// Reopen the naming popup for the next awaiting drive (the topbar tag button).
+function reopenDrivePrompt() {
+  promptHiddenByUser = false;
+  if (lastState) syncDrivePrompt(lastState);
+}
+
 // Decide which blank-drive popup (if any) should be showing, given the latest
 // state. Shows them strictly one at a time, in the order the backend reports.
 function syncDrivePrompt(state) {
+  // The popup only belongs while the bot is running. If it's stopped (power
+  // off / quit / a stale reboot), close the popup and reset the manual-hide
+  // flag so the next run starts clean.
+  if (state.Running !== 1) {
+    closeDrivePrompt();
+    promptHiddenByUser = false;
+    return;
+  }
+
   const blanks = Array.isArray(state.BlankDrives) ? state.BlankDrives : [];
   const tokens = new Set(blanks.map(b => b.token));
 
@@ -191,13 +218,16 @@ function syncDrivePrompt(state) {
     if (!tokens.has(t)) dismissedTokens.delete(t);
   }
 
-  const next = blanks.find(b => !dismissedTokens.has(b.token));
-
-  // If the popup is open for a drive that's no longer waiting, close it.
+  // If the popup is open for a drive that's no longer waiting (e.g. it was
+  // unplugged), close it immediately.
   if (currentPromptToken && !tokens.has(currentPromptToken)) {
     closeDrivePrompt();
   }
 
+  // The user closed the popup on purpose — don't auto-reopen until they ask.
+  if (promptHiddenByUser) return;
+
+  const next = blanks.find(b => !dismissedTokens.has(b.token));
   if (!next) {
     if (currentPromptToken && dismissedTokens.has(currentPromptToken)) closeDrivePrompt();
     return;
@@ -267,8 +297,10 @@ function wireDelegatedEvents() {
       document.getElementById('pendingModal')?.classList.add('hidden');
     }
 
-    // --- New-drive prompt confirm ---
+    // --- New-drive prompt: confirm / close / reopen ---
     if (e.target.closest('#confirmDriveBtn')) handleConfirmDrive();
+    if (e.target.closest('#closeDrivePromptBtn')) closeDrivePromptManually();
+    if (e.target.closest('#nameDriveBtn')) reopenDrivePrompt();
 
     // --- Update flow ---
     const updateBtn = e.target.closest('#updateBtn');

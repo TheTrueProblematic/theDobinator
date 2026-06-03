@@ -27,6 +27,13 @@
         The Dobinator
       </span>
       <div class="topbar-actions">
+        <button id="nameDriveBtn" class="name-drive-btn" aria-label="Name pending drives" title="Drives waiting to be named">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/>
+            <line x1="7" y1="7" x2="7.01" y2="7"/>
+          </svg>
+          <span id="nameDriveCount" class="pending-count" aria-hidden="true"></span>
+        </button>
         <button id="updateBtn" class="update-btn" aria-label="Apply available update" title="Update available">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
@@ -96,6 +103,9 @@
       <div class="modal-content">
         <div class="modal-header">
           <h2 class="modal-title" id="drivePromptTitle">New Drive</h2>
+          <button id="closeDrivePromptBtn" class="modal-close" aria-label="Close (name this drive later)" title="Close — you can reopen this from the tag button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
         </div>
         <div class="modal-body">
           <label class="form-field">

@@ -213,6 +213,40 @@ export const ASSERTIONS = [
   },
 
   {
+    name: 'Blank drives awaiting input reveal the name-drives button + count',
+    state: { Running: 1, StatusNumber: 0, BlankDrives: [
+      { token: 'blk-1-E', sizeTB: 2 }, { token: 'blk-2-F', sizeTB: 4 },
+    ] },
+    check(doc) {
+      const btn = $(doc, '#nameDriveBtn');
+      if (!btn) return fail('name-drives button missing');
+      if (!btn.classList.contains('is-visible')) return fail('name-drives button should be visible');
+      const count = $(doc, '#nameDriveCount');
+      if (!count || count.textContent !== '2') return fail(`expected count "2", got "${count && count.textContent}"`);
+      return ok();
+    },
+  },
+
+  {
+    name: 'Stopped bot clears pending list/badge and hides the name-drives button',
+    setupBefore: { Running: 1, StatusNumber: 0,
+      PendingDrives: [{ name: 'BasinElectric', sizeTB: 2 }],
+      BlankDrives: [{ token: 'blk-1-E', sizeTB: 2 }] },
+    state: { Running: 0, StatusNumber: 0,
+      PendingDrives: [{ name: 'BasinElectric', sizeTB: 2 }],
+      BlankDrives: [{ token: 'blk-1-E', sizeTB: 2 }] },
+    check(doc) {
+      const count = $(doc, '#pendingCount');
+      if (count && count.classList.contains('is-visible')) return fail('pending badge should be hidden when stopped');
+      const nameBtn = $(doc, '#nameDriveBtn');
+      if (nameBtn && nameBtn.classList.contains('is-visible')) return fail('name-drives button should be hidden when stopped');
+      const text = $(doc, '#pendingList')?.textContent || '';
+      if (!/no drives waiting/i.test(text)) return fail('pending list should be empty when stopped');
+      return ok();
+    },
+  },
+
+  {
     name: 'Running=1, Status=10 shows green success card',
     state: { Running: 1, StatusNumber: 10 },
     check(doc) {

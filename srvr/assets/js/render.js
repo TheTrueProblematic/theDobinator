@@ -228,14 +228,36 @@ export function render(state, prev) {
     updateBtn.classList.toggle('is-visible', showUpdate);
   }
 
-  // Reflect the pending-drive count badge on every render (independent of the
-  // change gate below) so it stays in sync immediately.
+  // Pending + blank drive lists only make sense while the bot is running. When
+  // it's stopped, treat them as empty so a power-off / quit clears the popup,
+  // the count badge, and the Pending Drives menu immediately (and stale lists
+  // from a hard reboot never linger). Handled on every render, independent of
+  // the card-change gate below.
+  const running = state.Running === 1;
+  const pending = (running && Array.isArray(state.PendingDrives)) ? state.PendingDrives : [];
+  const blanks = (running && Array.isArray(state.BlankDrives)) ? state.BlankDrives : [];
+
   const pendingCount = document.getElementById('pendingCount');
   if (pendingCount) {
-    const n = Array.isArray(state.PendingDrives) ? state.PendingDrives.length : 0;
-    pendingCount.textContent = n > 99 ? '99+' : String(n);
-    pendingCount.classList.toggle('is-visible', n > 0);
+    pendingCount.textContent = pending.length > 99 ? '99+' : String(pending.length);
+    pendingCount.classList.toggle('is-visible', pending.length > 0);
   }
+
+  // "Name pending drives" button: visible only while running and blank drives
+  // are awaiting input, giving a way to reopen the naming popup after closing it.
+  const nameBtn = document.getElementById('nameDriveBtn');
+  if (nameBtn) {
+    nameBtn.classList.toggle('is-visible', blanks.length > 0);
+    const nameCount = document.getElementById('nameDriveCount');
+    if (nameCount) {
+      nameCount.textContent = blanks.length > 9 ? '9+' : String(blanks.length);
+      nameCount.classList.toggle('is-visible', blanks.length > 0);
+    }
+  }
+
+  // Keep the pending list in sync every render (it's tiny). Using the
+  // running-gated list means it empties out the moment the bot stops.
+  renderPending(pending);
 
   const stage = document.getElementById('stage');
   if (!stage) return false;
@@ -249,19 +271,13 @@ export function render(state, prev) {
     prev.CompletedBaseFiles !== state.CompletedBaseFiles ||
     prev.TotalMainFiles !== state.TotalMainFiles ||
     prev.CompletedMainFiles !== state.CompletedMainFiles ||
-    JSON.stringify(prev.CompletedDrives) !== JSON.stringify(state.CompletedDrives) ||
-    JSON.stringify(prev.PendingDrives) !== JSON.stringify(state.PendingDrives);
+    JSON.stringify(prev.CompletedDrives) !== JSON.stringify(state.CompletedDrives);
 
   if (!changed) return false;
 
   // Render history list if it changed
   if (!prev || JSON.stringify(prev.CompletedDrives) !== JSON.stringify(state.CompletedDrives)) {
     renderHistory(state.CompletedDrives);
-  }
-
-  // Render pending list if it changed
-  if (!prev || JSON.stringify(prev.PendingDrives) !== JSON.stringify(state.PendingDrives)) {
-    renderPending(state.PendingDrives);
   }
 
   // Connection error wins over everything.
