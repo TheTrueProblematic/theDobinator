@@ -73,6 +73,9 @@ GITHUB_API_URL = (
 )
 # How many 1-second drive-poll iterations between GitHub checks (~5 seconds).
 GITHUB_CHECK_EVERY = 5
+# How many 1-second poll iterations between full physical-disk scans (~2 seconds).
+# Disk enumeration spawns PowerShell, so it is throttled relative to the loop.
+DISK_SCAN_EVERY = 2
 
 # --- Secrets / keys file ---
 # The GitHub fine-grained PAT is deliberately NOT stored in source (it would
@@ -380,7 +383,7 @@ class DriveManager:
     def __init__(self, status_mgr):
         self.status_mgr = status_mgr
         self._lock = threading.Lock()
-        self._blank = []      # [{token, drive, sizeTB}]
+        self._blank = []      # [{token, disk, sizeTB, serial}]
         self._pending = []    # [job dicts]
         self._token_seq = 0
 
@@ -390,20 +393,23 @@ class DriveManager:
         pending_pub = [{"name": j.get("name", ""), "sizeTB": j.get("sizeTB", 0)} for j in self._pending]
         self.status_mgr.set_drive_lists(blank_pub, pending_pub)
 
-    # --- blank-awaiting drives -------------------------------------------------
-    def add_blank(self, drive, size_tb):
+    # --- blank-awaiting drives (identified by physical disk number) ------------
+    def add_blank(self, disk, size_tb, serial=""):
         with self._lock:
+            # If this disk is already awaiting input, don't add a duplicate.
+            if any(b["disk"] == disk for b in self._blank):
+                return None
             self._token_seq += 1
-            token = f"blk-{self._token_seq}-{drive[0]}"
-            self._blank.append({"token": token, "drive": drive, "sizeTB": size_tb})
+            token = f"blk-{self._token_seq}-d{disk}"
+            self._blank.append({"token": token, "disk": disk, "sizeTB": size_tb, "serial": serial})
             self._publish()
-            plog.info(f"Blank drive {drive} registered awaiting user input (token={token}).")
+            plog.info(f"Blank disk #{disk} registered awaiting user input (token={token}).")
             return token
 
-    def remove_blank_by_drive(self, drive):
+    def remove_blank_by_disk(self, disk):
         with self._lock:
             before = len(self._blank)
-            self._blank = [b for b in self._blank if b["drive"] != drive]
+            self._blank = [b for b in self._blank if b["disk"] != disk]
             if len(self._blank) != before:
                 self._publish()
 
@@ -425,15 +431,15 @@ class DriveManager:
         """Mark a job as started (remove it from the pending list)."""
         with self._lock:
             before = len(self._pending)
-            self._pending = [j for j in self._pending if j.get("path") != job.get("path")]
+            self._pending = [j for j in self._pending if j.get("disk") != job.get("disk")]
             if len(self._pending) != before:
                 self._publish()
 
-    def remove_pending_by_drive(self, drive):
-        """Drop any queued (not-yet-started) job for a drive that was unplugged."""
+    def remove_pending_by_disk(self, disk):
+        """Drop any queued (not-yet-started) job for a disk that was unplugged."""
         with self._lock:
             before = len(self._pending)
-            self._pending = [j for j in self._pending if j.get("path") != drive]
+            self._pending = [j for j in self._pending if j.get("disk") != disk]
             if len(self._pending) != before:
                 self._publish()
 
@@ -1387,36 +1393,66 @@ def process_drive(drive_path):
     return issues_found
 
 
-def format_drive(drive_path, label):
+def initialize_and_format_disk(disk_number, label, expected_tb=0, serial=""):
     """
-    Quick-format the drive as NTFS and apply `label` as its volume name, using
-    PowerShell's Format-Volume. Returns True on success, False otherwise.
+    Bring a whole physical disk to a clean state and lay down a single NTFS
+    partition labeled `label`, returning the assigned drive path ("E:\\") or None.
 
-    This is destructive (it wipes the drive) and is only ever called on a
-    blank/country drive that the user explicitly named + confirmed in the WebUI.
+    Unlike the old Format-Volume-by-letter approach (which only worked on an
+    already-mounted, readable volume and could leave a drive RAW/uninitialized),
+    this clears the disk, (re)initializes it GPT, creates a partition, assigns a
+    letter, and quick-formats NTFS. It therefore handles EVERY starting state:
+    brand-new/uninitialized disks, RAW disks, filesystems Windows can't read
+    (e.g. APFS), exFAT/FAT, and NTFS.
+
+    SAFETY: the PowerShell script refuses to touch a system/boot disk, and — when
+    given — verifies the disk's size (±1 TB) and serial number still match what
+    was detected, so a reused disk number can never wipe the wrong disk.
     """
-    letter = drive_path[0]
     safe_label = (label or "DRIVE")[:32].replace("'", "''")  # NTFS labels max 32 chars
-    logging.info(f"Formatting {letter}: as NTFS with label '{safe_label}' (quick format).")
-    cmd = [
-        "powershell",
-        "-NoProfile",
-        "-WindowStyle", "Hidden",
-        "-Command",
-        f"Format-Volume -DriveLetter {letter} -FileSystem NTFS "
-        f"-NewFileSystemLabel '{safe_label}' -Confirm:$false -Force",
-    ]
+    safe_serial = (serial or "").replace("'", "''")
+    ps = (
+        "$ErrorActionPreference='Stop';"
+        f"$n={int(disk_number)};"
+        "$d=Get-Disk -Number $n -ErrorAction SilentlyContinue;"
+        "if(-not $d){Write-Output 'ERR:no-disk';exit 3};"
+        "if($d.IsSystem -or $d.IsBoot){Write-Output 'ERR:system-disk';exit 4};"
+        "$tb=[math]::Round($d.Size/1000000000000);"
+        f"if({int(expected_tb)} -gt 0 -and [math]::Abs($tb-{int(expected_tb)}) -gt 1){{Write-Output 'ERR:size-mismatch';exit 5}};"
+        f"$want='{safe_serial}';"
+        "if($want -ne '' -and \"$($d.SerialNumber)\".Trim() -ne $want){Write-Output 'ERR:serial-mismatch';exit 6};"
+        "try{if($d.IsReadOnly){Set-Disk -Number $n -IsReadOnly $false}}catch{};"
+        "try{if($d.IsOffline){Set-Disk -Number $n -IsOffline $false}}catch{};"
+        "try{Clear-Disk -Number $n -RemoveData -RemoveOEM -Confirm:$false}catch{};"
+        "$d=Get-Disk -Number $n;"
+        "if($d.PartitionStyle -eq 'RAW'){Initialize-Disk -Number $n -PartitionStyle GPT};"
+        "$p=New-Partition -DiskNumber $n -UseMaximumSize -AssignDriveLetter;"
+        "Start-Sleep -Milliseconds 750;"
+        f"Format-Volume -Partition $p -FileSystem NTFS -NewFileSystemLabel '{safe_label}' -Confirm:$false -Force | Out-Null;"
+        "$L=(Get-Partition -DiskNumber $n | Where-Object {$_.DriveLetter -match '[A-Za-z]'} | Select-Object -First 1).DriveLetter;"
+        "Write-Output \"OK:$L\""
+    )
+    logging.info(f"Initializing+formatting disk #{disk_number} as NTFS (label='{safe_label}', expectedTB={expected_tb}).")
     try:
         # 0x08000000 is CREATE_NO_WINDOW
-        result = subprocess.run(cmd, capture_output=True, text=True, creationflags=0x08000000)
-        if result.returncode != 0:
-            logging.error(f"Format-Volume failed (rc={result.returncode}): {result.stderr or result.stdout}")
-            return False
-        logging.info(f"SUCCESS: Formatted {letter}: and applied label '{safe_label}'.")
-        return True
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+            capture_output=True, text=True, creationflags=0x08000000, timeout=600,
+        )
     except Exception as e:
-        logging.error(f"Exception while formatting {letter}: {e}")
-        return False
+        logging.error(f"Disk format subprocess failed for disk #{disk_number}: {e}")
+        return None
+
+    out = (result.stdout or "").strip()
+    err = (result.stderr or "").strip()
+    logging.info(f"Disk #{disk_number} format result: rc={result.returncode} stdout='{out}' stderr='{err}'")
+    m = re.search(r"OK:([A-Za-z])", out)
+    if result.returncode == 0 and m:
+        path = f"{m.group(1).upper()}:\\"
+        logging.info(f"SUCCESS: disk #{disk_number} formatted NTFS and mounted at {path}.")
+        return path
+    logging.error(f"Disk #{disk_number} did NOT format cleanly (rc={result.returncode}, out='{out}', err='{err}').")
+    return None
 
 
 def process_country_drive(job):
@@ -1425,7 +1461,9 @@ def process_country_drive(job):
     has supplied a Drive Name and Country in the WebUI.
 
     Steps:
-      1. Quick-format the drive and apply the chosen name (status 9).
+      1. Initialize + NTFS-format the whole disk and apply the chosen name
+         (status 9). This is what makes a brand-new/uninitialized/APFS/exFAT/FAT
+         disk usable; the assigned drive letter is captured here.
       2. Determine the region purely from the chosen country: USA -> US ("u"),
          anything else -> International ("i"). No LLM is involved.
       3. Copy the regional base files (status 3, via copy_region_files).
@@ -1434,17 +1472,23 @@ def process_country_drive(job):
       5. Clean up dobDir and report the drive completed.
 
     Returns False (no issues) on completion so the worker records it as a
-    completed drive, or True if the drive could not be prepared.
+    completed drive, or True if the drive could not be prepared/formatted.
     """
-    drive_path = job["path"]
     iso = (job.get("iso") or "").upper()
-    name = job.get("name") or get_volume_name(drive_path)
-    logging.info(f"========== Starting COUNTRY-DRIVE processing for {drive_path} (name='{name}', iso='{iso}') ==========")
+    name = job.get("name") or "DRIVE"
+    disk_number = job.get("disk")
+    logging.info(f"========== Starting COUNTRY-DRIVE processing for disk #{disk_number} (name='{name}', iso='{iso}') ==========")
 
-    # 1. Format the drive and apply the chosen name.
+    # 1. Initialize + format the whole disk; capture the assigned drive letter.
     status_mgr.update(status_number=9)
-    if not format_drive(drive_path, name):
-        logging.error("Formatting failed; continuing with the copy anyway.")
+    drive_path = initialize_and_format_disk(
+        disk_number, name, expected_tb=job.get("sizeTB", 0), serial=job.get("serial", "")
+    )
+    if not drive_path:
+        logging.error(f"Could not format disk #{disk_number}; aborting this build.")
+        return True  # flag as completed-with-issues so the operator notices
+    # Record the assigned path on the job so the worker can eject the right drive.
+    job["path"] = drive_path
 
     # 2. dobDir + workVars for the base copy (temporary files live in dobDir).
     status_mgr.update(status_number=1)
@@ -1708,34 +1752,126 @@ def trigger_update():
         logging.error(f"Failed to launch updater: {e}", exc_info=True)
 
 
-def handle_new_drive(drive, drive_queue):
+# Filesystems Windows can read/mount (and therefore could hold a packfiles.txt).
+READABLE_FILESYSTEMS = {"NTFS", "EXFAT", "FAT", "FAT32"}
+
+
+def scan_external_disks():
     """
-    Route a newly connected drive. Drives WITH packfiles.txt are queued for the
-    full build immediately. Drives WITHOUT it are registered as blank-awaiting so
-    the WebUI can prompt for a Drive Name + Country before anything happens.
+    Enumerate external (non-system, non-boot) physical disks via PowerShell and
+    return {disk_number: info}. Crucially this sees disks that GetLogicalDrives()
+    can NOT — brand-new/uninitialized disks, RAW disks, and disks with a
+    filesystem Windows can't read (e.g. APFS) have no drive letter at all.
+
+    Each info dict: {number, sizeTB, letter ("E:\\" or None), fs (UPPER or None),
+    style, serial}. `letter`/`fs` describe the first lettered, mountable volume on
+    the disk (if any).
+
+    Returns None on scan failure so callers can SKIP the iteration rather than
+    wrongly conclude every disk was removed.
     """
-    size_tb = drive_size_tb(drive)
-    if os.path.exists(os.path.join(drive, "packfiles.txt")):
+    ps = (
+        "$ErrorActionPreference='SilentlyContinue';"
+        "$out=@();"
+        "foreach($d in Get-Disk){"
+        "  if($d.IsSystem -or $d.IsBoot){continue};"
+        "  $letter=$null;$fs=$null;"
+        "  foreach($p in (Get-Partition -DiskNumber $d.Number)){"
+        "    if($p.DriveLetter -and ($p.DriveLetter -match '[A-Za-z]')){"
+        "      $v=Get-Volume -Partition $p;"
+        "      if($v){$letter=\"$($p.DriveLetter)\";$fs=\"$($v.FileSystemType)\";break}"
+        "    }"
+        "  };"
+        "  $out+=[pscustomobject]@{Number=$d.Number;Size=[int64]$d.Size;"
+        "PartitionStyle=\"$($d.PartitionStyle)\";SerialNumber=\"$($d.SerialNumber)\";"
+        "Letter=$letter;FileSystem=$fs}"
+        "};"
+        "ConvertTo-Json -Compress -Depth 3 -InputObject @($out)"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+            capture_output=True, text=True, creationflags=0x08000000, timeout=60,
+        )
+    except Exception as e:
+        plog.error(f"Disk scan failed to run: {e}")
+        return None
+    if result.returncode != 0:
+        plog.error(f"Disk scan rc={result.returncode}: {(result.stderr or '').strip()}")
+        return None
+    raw = (result.stdout or "").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except Exception as e:
+        plog.error(f"Disk scan JSON parse failed: {e}; raw={raw[:300]}")
+        return None
+    if isinstance(data, dict):
+        data = [data]
+
+    disks = {}
+    for item in data:
+        try:
+            num = int(item.get("Number"))
+        except Exception:
+            continue
+        size = item.get("Size") or 0
+        letter_char = item.get("Letter")
+        fs = item.get("FileSystem")
+        disks[num] = {
+            "number": num,
+            "sizeTB": int(round((size or 0) / 1_000_000_000_000)),
+            "letter": (f"{letter_char}:\\" if letter_char else None),
+            "fs": (str(fs).upper() if fs else None),
+            "style": item.get("PartitionStyle"),
+            "serial": (str(item.get("SerialNumber")).strip() if item.get("SerialNumber") else ""),
+        }
+    return disks
+
+
+def classify_and_enqueue_disk(num, info, drive_queue):
+    """
+    Route a newly connected physical disk:
+      * If it has a readable, lettered volume that contains packfiles.txt -> queue
+        the full build immediately (unchanged behavior for prepared drives).
+      * Otherwise (NTFS/exFAT/FAT with no packfiles, OR a RAW/uninitialized/foreign
+        disk such as APFS or a brand-new drive) -> register it blank-awaiting so the
+        WebUI prompts for a Drive Name + Country before it is formatted + built.
+    """
+    size_tb = info.get("sizeTB", 0)
+    letter = info.get("letter")
+    fs = info.get("fs")
+    serial = info.get("serial", "")
+
+    has_packfiles = bool(
+        letter and fs in READABLE_FILESYSTEMS
+        and os.path.exists(os.path.join(letter, "packfiles.txt"))
+    )
+
+    if has_packfiles:
         job = {
-            "path": drive,
+            "disk": num,
+            "path": letter,
             "kind": "packfiles",
-            "name": get_volume_name(drive),
+            "name": get_volume_name(letter),
             "sizeTB": size_tb,
             "iso": None,
+            "serial": serial,
         }
         drive_manager.add_pending(job)
         drive_queue.put(job)
-        plog.info(f"Drive {drive} has packfiles.txt -> queued for full build (name='{job['name']}', {size_tb}TB).")
+        plog.info(f"Disk #{num} ({letter}, {fs}) has packfiles.txt -> queued for full build (name='{job['name']}', {size_tb}TB).")
     else:
-        drive_manager.add_blank(drive, size_tb)
-        plog.info(f"Drive {drive} has no packfiles.txt -> awaiting user input in WebUI ({size_tb}TB).")
+        drive_manager.add_blank(num, size_tb, serial)
+        plog.info(f"Disk #{num} (letter={letter}, fs={fs}, {size_tb}TB) has no packfiles -> awaiting user input in WebUI.")
 
 
 def consume_submissions(drive_queue):
     """
     Consume any blank-drive submissions written by the companion API into
     SUBMISSIONS_DIR. Each file is {token, name, country}. For each one still
-    matching a blank-awaiting drive, build a country job, register it pending,
+    matching a blank-awaiting disk, build a country job, register it pending,
     and queue it for the worker (which formats + builds it).
     """
     if not os.path.isdir(SUBMISSIONS_DIR):
@@ -1776,19 +1912,21 @@ def consume_submissions(drive_queue):
 
         match = drive_manager.pop_blank_by_token(token)
         if not match:
-            plog.warning(f"Submission token {token} no longer matches a connected blank drive; ignoring.")
+            plog.warning(f"Submission token {token} no longer matches a connected blank disk; ignoring.")
             continue
 
         job = {
-            "path": match["drive"],
+            "disk": match["disk"],
+            "path": None,  # assigned by initialize_and_format_disk during processing
             "kind": "country",
             "name": name,
             "sizeTB": match["sizeTB"],
             "iso": iso,
+            "serial": match.get("serial", ""),
         }
         drive_manager.add_pending(job)
         drive_queue.put(job)
-        plog.warning(f"Blank drive {match['drive']} submitted as '{name}' ({iso}) -> queued for build.")
+        plog.warning(f"Blank disk #{match['disk']} submitted as '{name}' ({iso}) -> queued for build.")
 
 
 def worker_thread(drive_queue, status_mgr):
@@ -1799,14 +1937,16 @@ def worker_thread(drive_queue, status_mgr):
             if job is None:  # Shutdown signal
                 break
 
-            drive_path = job["path"]
+            drive_path = job.get("path")
             kind = job.get("kind", "packfiles")
-            vol_name = job.get("name") or get_volume_name(drive_path)
+            vol_name = job.get("name") or (get_volume_name(drive_path) if drive_path else "Drive")
             drive_manager.start_job(job)
 
-            # If the drive was unplugged while it sat in the queue, drop it
-            # instead of processing a drive that is no longer there.
-            if not os.path.exists(drive_path):
+            # For an already-lettered drive (packfiles build), if it was unplugged
+            # while queued, drop it instead of processing a drive that's gone. A
+            # country drive has no letter yet (path is None); its disk presence and
+            # identity are re-verified inside initialize_and_format_disk.
+            if kind != "country" and not (drive_path and os.path.exists(drive_path)):
                 logging.warning(f"Queued drive {drive_path} is no longer connected; skipping it.")
                 if drive_queue.empty():
                     current_state = status_mgr._read_data()
@@ -1823,6 +1963,10 @@ def worker_thread(drive_queue, status_mgr):
             else:
                 had_issues = process_drive(drive_path)
 
+            # A country build assigns the drive letter during formatting, so read
+            # the final path back off the job for the eject step.
+            final_path = job.get("path") or drive_path
+
             if had_issues is not None:
                 # Add to completed drives
                 status_mgr.add_completed_drive(vol_name, had_issues)
@@ -1834,8 +1978,9 @@ def worker_thread(drive_queue, status_mgr):
                     status_mgr.update(status_number=10)
 
                 # Eject the drive
-                logging.info(f"Ejecting drive {drive_path}...")
-                eject_drive(drive_path)
+                if final_path:
+                    logging.info(f"Ejecting drive {final_path}...")
+                    eject_drive(final_path)
             else:
                 # If packfiles.txt wasn't found, it resets status if the queue is empty
                 current_state = status_mgr._read_data()
@@ -1896,27 +2041,52 @@ def main():
     update_watcher = UpdateWatcher(status_mgr, github_pat)
     poll_count = 0
 
-    # Instantly add all currently connected drives to the known list
-    logging.debug("Fetching initial list of connected drives...")
-    known_drives = get_connected_drives()
-    logging.info(f"Initial drives detected and added to ignore list: {', '.join(known_drives) if known_drives else 'None'}")
-
     # Make sure the blank-drive submission inbox exists before we start polling.
     try:
         os.makedirs(SUBMISSIONS_DIR, exist_ok=True)
     except Exception as e:
         logging.error(f"Failed to create submissions dir {SUBMISSIONS_DIR}: {e}")
 
+    # Establish the baseline set of EXTERNAL physical disks already connected at
+    # startup; these are ignored (only disks plugged in afterwards are processed),
+    # which also protects every pre-existing disk from ever being formatted.
+    # Detection is disk-based (not drive-letter based) so we can also see disks
+    # that have no readable volume at all (uninitialized / RAW / APFS / brand new).
+    known_disks = set()
+    baseline_established = False
+    initial_scan = None
+    for attempt in range(3):
+        initial_scan = scan_external_disks()
+        if initial_scan is not None:
+            break
+        plog.warning(f"Initial disk scan failed (attempt {attempt + 1}/3); retrying...")
+        time.sleep(2)
+    if initial_scan is not None:
+        known_disks = set(initial_scan.keys())
+        baseline_established = True
+        logging.info(f"Initial external disks (ignored as baseline): {sorted(known_disks) if known_disks else 'None'}")
+    else:
+        plog.critical("Could not scan disks at startup; baseline will be set on the first successful scan. "
+                      "No drives will be processed until then.")
+
     # Resume any drives that were still queued when a scheduled update restarted
-    # the program. They are enqueued directly (and marked known so the change
-    # detector does not also re-add them).
+    # the program. Packfiles drives resume if their letter is back; country
+    # drives resume if their disk is still present.
+    current_letters = get_connected_drives()
     for job in load_saved_queue():
-        drive = job.get("path") if isinstance(job, dict) else None
-        if drive and os.path.exists(drive):
-            known_drives.add(drive)
+        if not isinstance(job, dict):
+            continue
+        kind = job.get("kind", "packfiles")
+        path = job.get("path")
+        disk = job.get("disk")
+        still_here = (
+            (kind != "country" and path and path in current_letters)
+            or (kind == "country" and initial_scan is not None and disk in initial_scan)
+        )
+        if still_here:
             drive_manager.add_pending(job)
             drive_queue.put(job)
-            logging.info(f"Resuming queued drive after update restart: {drive}")
+            logging.info(f"Resuming queued drive after update restart: {job}")
         else:
             logging.info(f"Saved drive {job} is no longer connected; skipping resume.")
 
@@ -1924,41 +2094,48 @@ def main():
 
     try:
         while True:
-            plog.debug("Polling for currently connected drives...")
-            current_drives = get_connected_drives()
+            poll_count += 1
 
-            # Find newly connected drives (in current but not in known)
-            new_drives = current_drives - known_drives
-            for drive in new_drives:
-                plog.warning(f"--- NEW DRIVE DETECTED: {drive} ---")
-                plog.debug(f"Adding {drive} to the internal ignore list; classifying.")
-                known_drives.add(drive)
-                handle_new_drive(drive, drive_queue)
-
-            # Find drives that were removed (in known but not in current)
-            removed_drives = known_drives - current_drives
-            for drive in removed_drives:
-                plog.warning(f"--- DRIVE REMOVED: {drive} ---")
-                plog.debug(f"Removing {drive} from the internal ignore list so it can be re-processed if inserted again.")
-                known_drives.remove(drive)
-                # Stop tracking an unplugged drive: drop it from the blank-awaiting
-                # list (so its popup disappears) and from the pending queue list (so
-                # it leaves the Pending Drives menu). A job already in the work queue
-                # is additionally skipped by the worker if the drive is gone.
-                drive_manager.remove_blank_by_drive(drive)
-                drive_manager.remove_pending_by_drive(drive)
+            # Disk enumeration is heavier than a drive-letter check (it spawns
+            # PowerShell), so run it every DISK_SCAN_EVERY iterations rather than
+            # every second. Submissions are still consumed every iteration so the
+            # WebUI Confirm button feels responsive.
+            if poll_count % DISK_SCAN_EVERY == 0:
+                scan = scan_external_disks()
+                if scan is None:
+                    plog.debug("Disk scan failed this cycle; leaving known set unchanged.")
+                else:
+                    current_disks = set(scan.keys())
+                    if not baseline_established:
+                        known_disks = current_disks
+                        baseline_established = True
+                        logging.info(f"Disk baseline established late: {sorted(known_disks) if known_disks else 'None'}")
+                    else:
+                        for num in (current_disks - known_disks):
+                            info = scan[num]
+                            plog.warning(f"--- NEW DISK DETECTED: #{num} ({info.get('letter')}, fs={info.get('fs')}, {info.get('sizeTB')}TB) ---")
+                            classify_and_enqueue_disk(num, info, drive_queue)
+                        for num in (known_disks - current_disks):
+                            plog.warning(f"--- DISK REMOVED: #{num} ---")
+                            # Stop tracking an unplugged disk: drop it from the
+                            # blank-awaiting list (so its popup disappears) and the
+                            # pending list (so it leaves the Pending Drives menu).
+                            # A job already in the work queue is additionally skipped
+                            # by the worker if the drive is gone.
+                            drive_manager.remove_blank_by_disk(num)
+                            drive_manager.remove_pending_by_disk(num)
+                        known_disks = current_disks
 
             # Consume any blank-drive submissions the WebUI posted via the API.
             consume_submissions(drive_queue)
 
-            # Reset status to 0 if no known drives are connected and queue is empty
-            if not known_drives and drive_queue.empty():
+            # Reset status to 0 if no external disks are connected and queue is empty
+            if not known_disks and drive_queue.empty():
                 current_state = status_mgr._read_data()
                 if current_state.get("StatusNumber", 0) != 0:
                     status_mgr.update(status_number=0)
-                
+
             # Every 5th poll (~5 seconds) check GitHub for a newer version.
-            poll_count += 1
             if poll_count % GITHUB_CHECK_EVERY == 0:
                 update_watcher.trigger_check()
 
