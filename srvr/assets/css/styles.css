@@ -627,6 +627,36 @@ select.form-input { cursor: pointer; }
   color: var(--warning);
 }
 
+.history-item-note {
+  font-size: 0.82rem;
+  color: var(--warning);
+  margin-top: 0.1rem;
+}
+
+/* Header actions cluster (e.g. Clear + Close on the Completed Drives modal) */
+.modal-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.modal-clear-btn {
+  background: transparent;
+  border: 1px solid var(--card-border);
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.8rem;
+  padding: 0.3rem 0.7rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color .2s var(--ease), border-color .2s var(--ease);
+}
+
+.modal-clear-btn:hover {
+  color: var(--fg);
+  border-color: var(--fg);
+}
+
 /* ---------- Spinner ---------- */
 
 .spinner {

@@ -2,7 +2,7 @@
 // wires up the power button (which calls the companion API and re-polls fast).
 
 import { fetchStatus, togglePower, applyUpdate, scheduleUpdate, applyUpdateReboot, scheduleUpdateReboot, submitDrive } from './api.js';
-import { render } from './render.js';
+import { render, clearCompletedHistory } from './render.js';
 import { COUNTRIES } from './countries.js';
 
 const POLL_INTERVAL_MS = 1000;
@@ -78,12 +78,13 @@ async function handlePowerClick() {
 }
 
 // A drive is actively being worked when the program is running and the status
-// is one of the in-progress steps (1–9, which includes the empty-drive region
-// and base-copy steps 8 and 9). Idle/finished states (0, 10, 11) mean nothing
-// is processing, so an update can be applied right away.
+// is one of the in-progress steps (1–9 for the build/format/country steps, and
+// 12–14 for imagery verification + correction). Idle/finished states (0, 10, 11)
+// mean nothing is processing, so an update can be applied right away.
 function isProcessing() {
   const s = lastState;
-  return !!(s && s.Running === 1 && s.StatusNumber >= 1 && s.StatusNumber <= 9);
+  return !!(s && s.Running === 1 && s.StatusNumber >= 1 &&
+            s.StatusNumber !== 10 && s.StatusNumber !== 11);
 }
 
 function closeUpdateModal() {
@@ -305,6 +306,12 @@ function wireDelegatedEvents() {
     const closeBtn = e.target.closest('#closeHistoryBtn');
     if (closeBtn) {
       document.getElementById('historyModal')?.classList.add('hidden');
+    }
+
+    // Clear the completed-drives view (drives remain in the CSV; this only hides
+    // them in this browser by remembering a cleared-before timestamp).
+    if (e.target.closest('#clearCompletedBtn')) {
+      clearCompletedHistory(lastState ? lastState.CompletedDrives : []);
     }
 
     const backdrop = e.target.closest('#modalBackdrop');

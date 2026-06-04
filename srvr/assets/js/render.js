@@ -16,6 +16,9 @@ export const STATUS_LABELS = {
   9: 'Formatting Drive',
   10: 'Drive Completed Successfully',
   11: 'Drive Completed — Errors Detected',
+  12: 'Verifying Imagery',
+  13: 'Correcting Missed Imagery',
+  14: 'Copying Corrected Imagery',
 };
 
 const ICONS = {
@@ -176,6 +179,29 @@ function screenForState(state) {
           <h1 class="headline"><span>${esc(STATUS_LABELS[11])}</span></h1>
           <p class="subline">Check <strong>ISSUES.md</strong> at the root of the drive for details on what came up.</p>` };
 
+    case 12:
+      return {
+        cardClass: '',
+        inner: spinnerHeadline(STATUS_LABELS[12]) +
+          `<p class="subline">Regenerating the packfile and checking every imagery file made it onto the drive.</p>`
+      };
+
+    case 13:
+      return {
+        cardClass: '',
+        inner: spinnerHeadline(STATUS_LABELS[13]) +
+          `<p class="subline">Some imagery files were missing — working out where to find them.<br/>
+            <em class="hint">The AI is thinking — this may take a while.</em></p>`
+      };
+
+    case 14:
+      return {
+        cardClass: '',
+        inner: spinnerHeadline(STATUS_LABELS[14]) +
+          progressBlock('main', state.CompletedMainFiles, state.TotalMainFiles) +
+          `<p class="subline">Copying the imagery files that were missed the first time.</p>`
+      };
+
     default:
       return {
         cardClass: '',
@@ -300,7 +326,8 @@ export function render(state, prev) {
     prev && !prev._error &&
     prev.Running === 1 && state.Running === 1 &&
     prev.StatusNumber === state.StatusNumber &&
-    (state.StatusNumber === 3 || state.StatusNumber === 5 || state.StatusNumber === 8)
+    (state.StatusNumber === 3 || state.StatusNumber === 5 ||
+     state.StatusNumber === 8 || state.StatusNumber === 14)
   ) {
     updateProgressInPlace(stage, state);
     return true;
@@ -360,30 +387,72 @@ function renderPending(pendingDrives = []) {
   }).join('');
 }
 
+// --- "Clear completed" view filter ---------------------------------------
+// Clearing the completed list is a per-browser view action: the drives stay in
+// completedDrives.csv (and in status.json) forever, but we remember the newest
+// timestamp the operator chose to clear and hide anything at or before it. Using
+// the timestamp (not the name) as the cutoff keeps this correct even when two
+// drives share the same name. ISO timestamps (fixed "YYYY-MM-DDTHH:MM:SS" form)
+// compare correctly as plain strings.
+const CLEARED_KEY = 'dob_completed_cleared_before';
+
+function getClearedBefore() {
+  try { return localStorage.getItem(CLEARED_KEY) || ''; } catch { return ''; }
+}
+
+function visibleCompletedDrives(completedDrives = []) {
+  const cleared = getClearedBefore();
+  return (completedDrives || []).filter(
+    d => !cleared || !d.timestamp || String(d.timestamp) > cleared
+  );
+}
+
+// Hide everything currently completed by remembering the newest timestamp, then
+// re-render the (now empty) list. Called from the WebUI "Clear" button.
+export function clearCompletedHistory(completedDrives = []) {
+  const tss = (completedDrives || []).map(d => d.timestamp).filter(Boolean).sort();
+  const marker = tss.length ? tss[tss.length - 1] : new Date().toISOString().slice(0, 19);
+  try { localStorage.setItem(CLEARED_KEY, marker); } catch { /* ignore */ }
+  renderHistory(completedDrives);
+}
+
 function renderHistory(completedDrives = []) {
   const list = document.getElementById('historyList');
   if (!list) return;
 
-  if (!completedDrives || completedDrives.length === 0) {
+  const visible = visibleCompletedDrives(completedDrives);
+
+  if (visible.length === 0) {
     list.innerHTML = `<div class="subline" style="text-align: center; margin-top: 0;">No drives completed in the last 24 hours.</div>`;
     return;
   }
 
   // Reverse the array to show most recent at the top
-  const drives = [...completedDrives].reverse();
+  const drives = [...visible].reverse();
 
   list.innerHTML = drives.map(drive => {
-    const isWarning = drive.issues;
+    // Coloring is driven by verification: verified drives are green, drives that
+    // failed imagery verification are yellow with an explanatory note. Drives
+    // without packfiles (and legacy rows) default to verified. A copy-issues
+    // drive is also shown yellow, preserving the existing "Experienced Issues"
+    // wording.
+    const verified = drive.verified !== false;
+    const hasIssues = !!drive.issues;
+    const isWarning = !verified || hasIssues;
     const itemClass = isWarning ? 'is-warning' : 'is-success';
     const icon = isWarning ? ICONS.warn : ICONS.check;
-    const label = isWarning ? `${esc(drive.name)} Experienced Issues` : `${esc(drive.name)} Completed`;
+    const label = hasIssues ? `${esc(drive.name)} Experienced Issues` : `${esc(drive.name)} Completed`;
     const when = formatTimestamp(drive.timestamp);
+    const note = !verified
+      ? `<div class="history-item-note">Not all imagery files were found.</div>`
+      : '';
 
     return `
       <div class="history-item ${itemClass}">
         <div class="history-item-icon">${icon}</div>
         <div class="history-item-body">
           <div class="history-item-text">${label}</div>
+          ${note}
           ${when ? `<div class="history-item-time">${esc(when)}</div>` : ''}
         </div>
       </div>

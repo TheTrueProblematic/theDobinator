@@ -313,7 +313,11 @@ class StatusManager:
         """
         Read the permanent completedDrives.csv and return the entries that
         completed within the last `hours` hours, newest last. Each entry is a
-        dict {name, issues, timestamp} matching what the WebUI consumes.
+        dict {name, issues, verified, timestamp} matching what the WebUI consumes.
+
+        CSV columns are: timestamp, name, issues(0/1), verified(0/1). The verified
+        column is newer — rows without it (and drives that never run imagery
+        verification, e.g. country drives) default to verified=True.
         """
         recent = []
         if not os.path.exists(COMPLETED_DRIVES_CSV):
@@ -329,12 +333,16 @@ class StatusManager:
                     issues = False
                     if len(row) >= 3:
                         issues = row[2].strip().lower() in ("1", "true", "yes")
+                    # Default True for legacy 3-column rows so old history stays green.
+                    verified = True
+                    if len(row) >= 4:
+                        verified = row[3].strip().lower() in ("1", "true", "yes")
                     try:
                         ts = datetime.datetime.fromisoformat(ts_str)
                     except ValueError:
                         continue
                     if ts >= cutoff:
-                        recent.append({"name": name, "issues": issues, "timestamp": ts_str})
+                        recent.append({"name": name, "issues": issues, "verified": verified, "timestamp": ts_str})
         except Exception as e:
             logging.error(f"Failed to read {COMPLETED_DRIVES_CSV}: {e}")
         return recent
@@ -347,18 +355,22 @@ class StatusManager:
             data["CompletedDrives"] = recent
             self._write_data(data)
 
-    def add_completed_drive(self, name, had_issues):
+    def add_completed_drive(self, name, had_issues, verified=True):
         """
         Permanently record a completed drive in completedDrives.csv (kept
         forever) and refresh the last-24h view exposed to the WebUI.
+
+        Columns: timestamp, name, issues(0/1), verified(0/1). `verified` is the
+        imagery-verification outcome (packfiles drives); country/no-packfiles
+        drives are recorded verified=True ("assumed verified").
         """
         ts = datetime.datetime.now().isoformat(timespec="seconds")
         try:
             os.makedirs(os.path.dirname(COMPLETED_DRIVES_CSV), exist_ok=True)
             with open(COMPLETED_DRIVES_CSV, mode='a', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
-                writer.writerow([ts, name, "1" if had_issues else "0"])
-            logging.info(f"Recorded completed drive '{name}' (issues={bool(had_issues)}) at {ts}")
+                writer.writerow([ts, name, "1" if had_issues else "0", "1" if verified else "0"])
+            logging.info(f"Recorded completed drive '{name}' (issues={bool(had_issues)}, verified={bool(verified)}) at {ts}")
         except Exception as e:
             logging.error(f"Failed to append to {COMPLETED_DRIVES_CSV}: {e}")
         self.refresh_completed_drives()
@@ -1052,18 +1064,10 @@ def copy_airport(drive_path, source_zip=AIRPORT_ZIP_SOURCE):
 
     logging.info("--- Finished copy_airport Process ---")
 
-def matchFiles(drive_path):
-    """
-    Instructs the AI on how to actually find the rest of the files.
-    Creates a new LLM instance with the working directory on the root of the processing drive.
-    """
-    status_mgr.update(status_number=4)
-    logging.info("--- Starting matchFiles Process ---")
-    
-    # Create a new LLM object with its working directory on the root of the drive
-    match_llm = LLM(working_directory=drive_path)
-    
-    prompt = (
+# The instructions handed to the matchFiles LLM. Pulled out to a module-level
+# constant so the imagery-verification fix_loop can quote it verbatim as the
+# "previous agent's prompt" when asking a corrective LLM to recover misses.
+MATCH_FILES_PROMPT = (
         "You are currently on the root of a drive that has some data on it, but needs even more. "
         "Currently, it has a file called packfiles.txt, a dobDir folder, and an ARS folder. "
         "In that ARS folder is another subfolder called data. In that data folder are a variety "
@@ -1102,8 +1106,21 @@ def matchFiles(drive_path):
         "Final Note: All of the files that you are looking for are in one of three subfolders of \"U:\\ARS\\Data\\...\". Namely the imagery, geocode, and vector folders. There is no need to look in any other folders such as imagery_old, imagery_stage, vector_old, etc. Don't look in these folders.\n\n"
         "SAFETY WARNING: The U drive you should treat as READ ONLY. Do not make any files here, even temporary files. You are just reading information from it.\n\n"
         "CRITICAL: MAKE ABSOLUTE SURE THAT YOU FIND ALL FILES IN PACKFILES IN IMAGERY, VECTORS, AND GEOCODE!"
+)
 
-    )
+
+def matchFiles(drive_path):
+    """
+    Instructs the AI on how to actually find the rest of the files.
+    Creates a new LLM instance with the working directory on the root of the processing drive.
+    """
+    status_mgr.update(status_number=4)
+    logging.info("--- Starting matchFiles Process ---")
+
+    # Create a new LLM object with its working directory on the root of the drive
+    match_llm = LLM(working_directory=drive_path)
+
+    prompt = MATCH_FILES_PROMPT
     logging.info(f"Sending prompt to LLM in matchFiles: '{prompt}'")
     match_llm.use(prompt)
 
@@ -1196,21 +1213,25 @@ def matchFiles(drive_path):
 
     logging.info("--- Finished matchFiles Process ---")
 
-def mainCopy(drive_path):
+def _copy_from_mapping(drive_path, mapping_csv, status_number=5, issues_filename="ISSUES.txt"):
     """
-    Reads the mapping.csv created by matchFiles and copies the files using robocopy.
-    Tracks total and completed files, and logs any errors to ISSUES.txt.
+    Core robocopy routine shared by mainCopy and the imagery-verification fix_loop.
+
+    Reads `mapping_csv` (rows of "source,destination"), copies each entry with
+    robocopy, and tracks progress through the main-file status counters
+    (TotalMainFiles/CompletedMainFiles) under `status_number`. When
+    `issues_filename` is given, any errors are written to dobDir\\<issues_filename>;
+    pass None to skip writing an issues file (fix_loop runs don't want to clobber
+    or re-trigger the ISSUES flow). Returns the list of errors encountered.
     """
-    status_mgr.update(status_number=5)
-    logging.info("--- Starting mainCopy Process ---")
+    status_mgr.update(status_number=status_number)
     dobdir_path = os.path.join(drive_path, "dobDir")
-    mapping_csv = os.path.join(dobdir_path, "mapping.csv")
-    issues_txt = os.path.join(dobdir_path, "ISSUES.txt")
-    
+    errors_encountered = []
+
     if not os.path.exists(mapping_csv):
-        logging.error(f"mapping.csv not found at {mapping_csv}. Cannot proceed with mainCopy.")
-        return
-        
+        logging.error(f"Mapping CSV not found at {mapping_csv}. Nothing to copy.")
+        return errors_encountered
+
     try:
         with open(mapping_csv, 'r', encoding='utf-8') as f:
             reader = csv.reader(f)
@@ -1218,27 +1239,26 @@ def mainCopy(drive_path):
             rows = [row for row in reader if row and len(row) >= 2]
     except Exception as e:
         logging.error(f"Failed to read {mapping_csv}: {e}")
-        return
-        
+        return errors_encountered
+
     totalMainFiles = len(rows)
     completedMainFiles = 0
     status_mgr.update(total_main=totalMainFiles, comp_main=0)
-    errors_encountered = []
-    
-    logging.info(f"Total items to copy (totalMainFiles): {totalMainFiles}")
-    
+
+    logging.info(f"Total items to copy from {os.path.basename(mapping_csv)} (totalMainFiles): {totalMainFiles}")
+
     for row in rows:
         source_path = row[0].strip()
         dest_path = row[1].strip()
-        
+
         logging.debug(f"Processing copy from {source_path} to {dest_path}")
-        
+
         if not os.path.exists(source_path):
             error_msg = f"Source path does not exist: {source_path}"
             logging.error(error_msg)
             errors_encountered.append(f"{error_msg} (Destination was: {dest_path})")
             continue
-            
+
         cmd = []
         if os.path.isdir(source_path):
             # If it's a directory, use the /E flag for recursive copy
@@ -1249,10 +1269,10 @@ def mainCopy(drive_path):
             dest_dir = os.path.dirname(dest_path)
             filename = os.path.basename(source_path)
             cmd = ["robocopy", source_dir, dest_dir, filename]
-            
+
         cmd_str = " ".join([f'"{x}"' if ' ' in x else x for x in cmd])
         logging.info(f"Running command: {cmd_str}")
-        
+
         try:
             # 0x08000000 is CREATE_NO_WINDOW
             result = subprocess.run(cmd, capture_output=True, text=True, creationflags=0x08000000)
@@ -1268,20 +1288,32 @@ def mainCopy(drive_path):
             error_msg = f"Exception occurred while trying to copy {source_path}: {e}"
             logging.error(error_msg)
             errors_encountered.append(error_msg)
-            
-    logging.info(f"mainCopy process completed. Successfully copied {completedMainFiles} out of {totalMainFiles} items.")
-    
-    if errors_encountered:
-        logging.warning(f"Writing {len(errors_encountered)} errors to {issues_txt}")
+
+    logging.info(f"Copy from {os.path.basename(mapping_csv)} completed. Copied {completedMainFiles} of {totalMainFiles} items.")
+
+    if errors_encountered and issues_filename:
+        issues_path = os.path.join(dobdir_path, issues_filename)
+        logging.warning(f"Writing {len(errors_encountered)} errors to {issues_path}")
         try:
-            with open(issues_txt, 'w', encoding='utf-8') as f:
-                f.write(f"Errors encountered during mainCopy on {time.strftime('%Y-%m-%d %H:%M:%S')}:\n")
+            with open(issues_path, 'w', encoding='utf-8') as f:
+                f.write(f"Errors encountered during copy on {time.strftime('%Y-%m-%d %H:%M:%S')}:\n")
                 f.write("-" * 50 + "\n")
                 for err in errors_encountered:
                     f.write(err + "\n")
         except Exception as e:
-            logging.error(f"Failed to write to {issues_txt}: {e}")
-            
+            logging.error(f"Failed to write to {issues_path}: {e}")
+
+    return errors_encountered
+
+
+def mainCopy(drive_path):
+    """
+    Reads the mapping.csv created by matchFiles and copies the files using robocopy.
+    Tracks total and completed files, and logs any errors to ISSUES.txt.
+    """
+    logging.info("--- Starting mainCopy Process ---")
+    mapping_csv = os.path.join(drive_path, "dobDir", "mapping.csv")
+    _copy_from_mapping(drive_path, mapping_csv, status_number=5, issues_filename="ISSUES.txt")
     logging.info("--- Finished mainCopy Process ---")
 
 def summarizeIssues(drive_path):
@@ -1335,15 +1367,286 @@ def summarizeIssues(drive_path):
         
     logging.info("--- Finished summarizeIssues Process ---")
 
+# ---------------------------------------------------------------------------
+# Imagery verification (packfiles drives only)
+# ---------------------------------------------------------------------------
+# After the main build, a drive that arrived WITH a packfiles.txt is verified by
+# having ARS regenerate packfiles (which lists what is actually on the drive) and
+# confirming every imagery file the ORIGINAL packfiles.txt asked for is present.
+# If some are missing, an LLM is given the misses and asked to produce a
+# corrective mapping CSV, which is copied; this repeats up to FIX_LOOP_MAX_RUNS
+# times before the drive is finally recorded as completed-but-not-verified.
+
+# ARS regenerates packfiles.txt into its bin folder; the maintenance batch on the
+# target drive launches the ARS program, which we kill after a short settle so the
+# generated file is flushed and ARS is not left running.
+ARS_PROCESS_NAMES = ("ars.exe",)
+ARS_SETTLE_SECONDS = 25
+FIX_LOOP_MAX_RUNS = 5
+# Lines in a packfile that describe an imagery file start with this prefix.
+IMAGERY_PREFIX = "data\\imagery\\"
+
+
+def _quit_ars():
+    """Force-quit the ARS program (by image name, including child processes). Best-effort."""
+    for name in ARS_PROCESS_NAMES:
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/IM", name],
+                creationflags=0x08000000,  # CREATE_NO_WINDOW
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as e:
+            logging.error(f"Failed to taskkill ARS process '{name}': {e}")
+
+
+def generate_packfiles(drive_path):
+    """
+    Regenerate packfiles.txt on the drive being built and stash it in dobDir as
+    verify_packfiles.txt for comparison.
+
+    Launches DRIVE:\\ARS\\bin\\ars maintenance.bat (which starts the ARS program),
+    waits ARS_SETTLE_SECONDS for ARS to write its packfiles.txt into DRIVE:\\ARS\\bin,
+    quits ARS, then MOVES that packfiles.txt into dobDir\\verify_packfiles.txt
+    (deleting any existing verify_packfiles.txt first).
+
+    Returns the path to verify_packfiles.txt on success, or None on failure
+    (missing batch file / ARS never produced a packfiles.txt). Reusable by both
+    the initial verification (compare_packfiles) and fix_loop's re-checks.
+    """
+    status_mgr.update(status_number=12)
+    dobdir_path = os.path.join(drive_path, "dobDir")
+    bin_dir = os.path.join(drive_path, "ARS", "bin")
+    maintenance_bat = os.path.join(bin_dir, "ars maintenance.bat")
+    generated_packfiles = os.path.join(bin_dir, "packfiles.txt")
+    verify_packfiles = os.path.join(dobdir_path, "verify_packfiles.txt")
+
+    logging.info("--- Starting generate_packfiles Process ---")
+    if not os.path.isfile(maintenance_bat):
+        logging.error(f"ARS maintenance batch not found at {maintenance_bat}; cannot regenerate packfiles.")
+        return None
+
+    # Remove any stale generated packfiles so we know this run actually produced one.
+    try:
+        if os.path.exists(generated_packfiles):
+            os.remove(generated_packfiles)
+    except Exception as e:
+        logging.warning(f"Could not remove stale {generated_packfiles}: {e}")
+
+    # Launch the maintenance batch (starts the ARS program), let it settle, then quit ARS.
+    logging.info(f"Launching ARS maintenance: {maintenance_bat}")
+    proc = None
+    try:
+        proc = subprocess.Popen(
+            ["cmd.exe", "/c", maintenance_bat],
+            cwd=bin_dir,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=0x08000000,  # CREATE_NO_WINDOW
+        )
+    except Exception as e:
+        logging.error(f"Failed to launch ARS maintenance batch: {e}")
+        return None
+
+    logging.info(f"Waiting {ARS_SETTLE_SECONDS}s for ARS to generate packfiles...")
+    time.sleep(ARS_SETTLE_SECONDS)
+
+    logging.info("Quitting ARS...")
+    _quit_ars()
+    if proc is not None:
+        _kill_process_tree(proc)
+
+    if not os.path.exists(generated_packfiles):
+        logging.error(f"ARS did not produce a packfiles.txt at {generated_packfiles}.")
+        return None
+
+    # Replace any prior verify_packfiles.txt and move the freshly generated one in.
+    try:
+        os.makedirs(dobdir_path, exist_ok=True)
+        if os.path.exists(verify_packfiles):
+            os.remove(verify_packfiles)
+            logging.info(f"Deleted existing {verify_packfiles}")
+        shutil.move(generated_packfiles, verify_packfiles)
+        logging.info(f"SUCCESS: moved generated packfiles to {verify_packfiles}")
+    except Exception as e:
+        logging.error(f"Failed to move generated packfiles into dobDir: {e}")
+        return None
+
+    logging.info("--- Finished generate_packfiles Process ---")
+    return verify_packfiles
+
+
+def _read_imagery_lines(packfile_path):
+    """Return the list of imagery entries (lines under data\\imagery\\) in a packfile."""
+    entries = []
+    if not packfile_path or not os.path.exists(packfile_path):
+        return entries
+    try:
+        with open(packfile_path, "r", encoding="utf-8", errors="replace") as f:
+            for raw in f:
+                s = raw.strip()
+                if not s:
+                    continue
+                norm = s.replace("/", "\\").lower()
+                if norm.startswith(IMAGERY_PREFIX):
+                    entries.append(s)
+    except Exception as e:
+        logging.error(f"Failed to read imagery lines from {packfile_path}: {e}")
+    return entries
+
+
+def _write_missed_imagery(drive_path, intended, copied):
+    """Write dobDir\\missedImagery.txt describing the intended vs copied imagery sets."""
+    dobdir_path = os.path.join(drive_path, "dobDir")
+    missed_path = os.path.join(dobdir_path, "missedImagery.txt")
+    try:
+        os.makedirs(dobdir_path, exist_ok=True)
+        with open(missed_path, "w", encoding="utf-8") as f:
+            f.write("The intended set of imagery files was:\n\n")
+            f.write("\n".join(intended) + "\n\n")
+            f.write("Yet only these were copied:\n\n")
+            f.write("\n".join(copied) + "\n")
+        logging.info(f"Wrote missed-imagery report to {missed_path}")
+    except Exception as e:
+        logging.error(f"Failed to write {missed_path}: {e}")
+    return missed_path
+
+
+def _imagery_is_complete(drive_path):
+    """
+    Compare the original packfiles.txt against dobDir\\verify_packfiles.txt by
+    counting imagery entries (lines under data\\imagery\\). Returns True if the
+    drive has at least as many imagery files as the original asked for (verified),
+    or False if some are missing. On a discrepancy it (re)writes
+    dobDir\\missedImagery.txt so the corrective LLM has fresh input.
+
+    Shared core for compare_packfiles (initial check) and fix_loop (re-checks) so
+    completeness is always measured identically.
+    """
+    dobdir_path = os.path.join(drive_path, "dobDir")
+    original = os.path.join(drive_path, "packfiles.txt")
+    verify = os.path.join(dobdir_path, "verify_packfiles.txt")
+
+    intended = _read_imagery_lines(original)
+    copied = _read_imagery_lines(verify)
+    logging.info(f"Imagery check: packfiles.txt has {len(intended)} imagery entries, verify_packfiles.txt has {len(copied)}.")
+
+    if len(intended) > len(copied):
+        logging.warning(
+            f"Imagery discrepancy: {len(intended) - len(copied)} more imagery files intended than were copied."
+        )
+        _write_missed_imagery(drive_path, intended, copied)
+        return False
+    logging.info("Imagery verified: every intended imagery file is present.")
+    return True
+
+
+def compare_packfiles(drive_path):
+    """
+    Initial imagery verification: compare packfiles.txt with the freshly generated
+    verify_packfiles.txt (imagery counts). If every intended imagery file is
+    present the drive is verified. Otherwise the shared core writes
+    missedImagery.txt and fix_loop(run 1) is started to recover the missing files.
+
+    Returns True if the drive is verified, False otherwise.
+    """
+    logging.info("--- Starting compare_packfiles Process ---")
+    if _imagery_is_complete(drive_path):
+        logging.info("--- compare_packfiles: drive verified, no fix needed ---")
+        return True
+    logging.warning("compare_packfiles found missing imagery; entering fix_loop.")
+    return fix_loop(drive_path, 1)
+
+
+def _run_fix_llm(drive_path, run_number):
+    """
+    Spin up a fresh LLM on the drive root to produce dobDir\\extraMapping{n}.csv
+    from missedImagery.txt, quoting the original matchFiles prompt as the previous
+    agent's goal.
+    """
+    status_mgr.update(status_number=13)
+    logging.info(f"--- fix_loop run {run_number}: launching corrective LLM ---")
+    fix_llm = LLM(working_directory=drive_path)
+    prompt = (
+        "An AI agent, much like you, was just run on this drive with this as its prompt and goal:\n\n"
+        "-------------------- PREVIOUS AGENT'S PROMPT --------------------\n"
+        f"{MATCH_FILES_PROMPT}\n"
+        "---\n\n"
+        "It thought that it got all of the files but I found some discrepancies. You are being run on "
+        "the root of the drive we are working on, and there is a subfolder called dobDir with a file in "
+        "it called missedImagery.txt. Look through this file to see which imagery files are missing and "
+        "work to find them and create a new mapping csv for them. Put this mapping csv in dobDir and "
+        f"call it extraMapping{run_number}.csv.\n\n"
+        "Given all of this, your task is to slowly, carefully, with extreme precision find any errors "
+        "that the initial agent could have caused and correct them. Read the initial prompt carefully so "
+        "you don't make any errors. Try as hard as you can to get this perfect. It matters a lot to me "
+        "that you do this right and you have to nail it! PLEASE!!!"
+    )
+    logging.info(f"Sending corrective prompt to LLM (run {run_number}).")
+    fix_llm.use(prompt)
+
+
+def fix_loop(drive_path, run_number):
+    """
+    Attempt to recover missing imagery files, up to FIX_LOOP_MAX_RUNS times.
+
+    run 1 (entered straight from compare_packfiles, with missedImagery.txt already
+      written): ask the LLM for extraMapping1.csv, copy it, then recurse to run 2.
+    runs 2..(MAX-1): first re-verify (generate_packfiles + imagery compare). If the
+      imagery is now complete, the drive is verified and we stop. Otherwise ask the
+      LLM for extraMapping{n}.csv, copy it, then recurse to run n+1.
+    run MAX (5): same start as the middle runs; if still incomplete, do a FINAL
+      re-verify after the copy and return its result. This is the last attempt — a
+      False here means the drive is recorded completed-but-not-verified.
+
+    Returns True if the drive ends up verified, False if all attempts are exhausted
+    without recovering every imagery file.
+    """
+    logging.info(f"========== fix_loop run {run_number}/{FIX_LOOP_MAX_RUNS} ==========")
+
+    # Every run after the first begins by re-checking whether the prior copy fixed
+    # things (regenerate packfiles via ARS and re-count imagery).
+    if run_number > 1:
+        generate_packfiles(drive_path)
+        if _imagery_is_complete(drive_path):
+            logging.info(f"fix_loop run {run_number}: imagery now complete; drive verified.")
+            return True
+
+    # Produce and copy a corrective mapping for this run.
+    _run_fix_llm(drive_path, run_number)
+    extra_csv = os.path.join(drive_path, "dobDir", f"extraMapping{run_number}.csv")
+    _copy_from_mapping(drive_path, extra_csv, status_number=14, issues_filename=None)
+
+    if run_number >= FIX_LOOP_MAX_RUNS:
+        # Final attempt: re-verify one last time after the copy.
+        generate_packfiles(drive_path)
+        verified = _imagery_is_complete(drive_path)
+        logging.info(f"fix_loop final run complete; verified={verified}.")
+        return verified
+
+    return fix_loop(drive_path, run_number + 1)
+
+
 def verifySuccess(drive_path):
     """
-    Checks for ISSUES.txt and runs summarizeIssues if it exists.
-    Returns True if issues were found, False otherwise.
+    Two-part post-build verification:
+      1. If mainCopy left an ISSUES.txt, summarize it (status 6); issues_found
+         reflects this (unchanged behavior).
+      2. Imagery verification: regenerate packfiles via ARS (generate_packfiles)
+         and confirm every intended imagery file is present (compare_packfiles),
+         recovering misses through fix_loop if needed; `verified` reflects the
+         outcome. If ARS can't regenerate packfiles (e.g. the maintenance batch is
+         missing) we skip verification and assume verified rather than blocking the
+         drive on missing tooling.
+
+    Returns (issues_found, verified).
     """
     logging.info("--- Starting verifySuccess Process ---")
     dobdir_path = os.path.join(drive_path, "dobDir")
     issues_txt = os.path.join(dobdir_path, "ISSUES.txt")
-    
+
     issues_found = False
     if os.path.exists(issues_txt):
         logging.warning("ISSUES.txt found! Running summarizeIssues.")
@@ -1351,9 +1654,16 @@ def verifySuccess(drive_path):
         summarizeIssues(drive_path)
     else:
         logging.info("No ISSUES.txt found. All copies were successful!")
-        
-    logging.info("--- Finished verifySuccess Process ---")
-    return issues_found
+
+    # --- Imagery verification (regenerate packfiles, compare, recover) ----------
+    verified = True
+    if generate_packfiles(drive_path):
+        verified = compare_packfiles(drive_path)
+    else:
+        logging.warning("Could not regenerate packfiles for verification; assuming verified.")
+
+    logging.info(f"--- Finished verifySuccess Process (issues={issues_found}, verified={verified}) ---")
+    return issues_found, verified
 
 def process_drive(drive_path):
     """Process a newly connected drive."""
@@ -1382,15 +1692,15 @@ def process_drive(drive_path):
             logging.info(f"SUCCESS: Deleted existing directory {dobdir_path}")
         except Exception as e:
             logging.error(f"FAILED to delete existing directory {dobdir_path}. Exception details: {e}")
-            return True
-            
+            return (True, True)
+
     logging.info(f"Attempting to create dobDir on {drive_path}...")
     try:
         os.makedirs(dobdir_path)
         logging.info(f"SUCCESS: Created directory {dobdir_path}")
     except Exception as e:
         logging.error(f"FAILED to create directory {dobdir_path}. Exception details: {e}")
-        return True
+        return (True, True)
     
     # Initialize the workVars.csv file in the dobDir directory
     workvars_path = os.path.join(dobdir_path, "workVars.csv")
@@ -1412,18 +1722,18 @@ def process_drive(drive_path):
     # Run the mainCopy process
     mainCopy(drive_path)
     
-    # Verify success and handle issues
-    issues_found = verifySuccess(drive_path)
-    
+    # Verify success: handle copy issues AND verify the imagery set is complete.
+    issues_found, verified = verifySuccess(drive_path)
+
     logging.info(f"Cleaning up {dobdir_path}...")
     try:
         shutil.rmtree(dobdir_path)
         logging.info(f"SUCCESS: Deleted directory {dobdir_path}")
     except Exception as e:
         logging.error(f"FAILED to delete directory {dobdir_path}. Exception details: {e}")
-    
+
     logging.info(f"========== Finished initial processing for {drive_path} ==========")
-    return issues_found
+    return (issues_found, verified)
 
 
 def initialize_and_format_disk(disk_number, label, expected_tb=0, serial=""):
@@ -1500,12 +1810,15 @@ def process_country_drive(job):
       2. Determine the region purely from the chosen country: USA -> US ("u"),
          anything else -> International ("i"). No LLM is involved.
       3. Copy the regional base files (status 3, via copy_region_files).
-      4. If the country is NOT the US, copy the three country-specific data sets
+      4. Copy + extract the airport archive into ARS\\data\\airport (status 7,
+         via copy_airport) — same as the packfiles build.
+      5. If the country is NOT the US, copy the three country-specific data sets
          (status 8, via copy_country_files).
-      5. Clean up dobDir and report the drive completed.
+      6. Clean up dobDir and report the drive completed.
 
-    Returns False (no issues) on completion so the worker records it as a
-    completed drive, or True if the drive could not be prepared/formatted.
+    Returns (had_issues, verified). Country drives have no packfiles, so they are
+    always "assumed verified" (verified=True); had_issues is False on a clean
+    completion or True if the drive could not be prepared/formatted.
     """
     iso = (job.get("iso") or "").upper()
     name = job.get("name") or "DRIVE"
@@ -1519,7 +1832,7 @@ def process_country_drive(job):
     )
     if not drive_path:
         logging.error(f"Could not format disk #{disk_number}; aborting this build.")
-        return True  # flag as completed-with-issues so the operator notices
+        return (True, True)  # flag as completed-with-issues so the operator notices
     # Record the assigned path on the job so the worker can eject the right drive.
     job["path"] = drive_path
 
@@ -1532,13 +1845,13 @@ def process_country_drive(job):
             shutil.rmtree(dobdir_path)
         except Exception as e:
             logging.error(f"FAILED to delete existing directory {dobdir_path}. Exception details: {e}")
-            return True
+            return (True, True)
     try:
         os.makedirs(dobdir_path)
         logging.info(f"SUCCESS: Created directory {dobdir_path}")
     except Exception as e:
         logging.error(f"FAILED to create directory {dobdir_path}. Exception details: {e}")
-        return True
+        return (True, True)
 
     work_vars = WorkVars(os.path.join(dobdir_path, "workVars.csv"))
 
@@ -1551,11 +1864,15 @@ def process_country_drive(job):
     # 4. Copy the regional base files (US gets US set, others get the international set).
     copy_region_files(drive_path, work_vars, status_number=3)
 
-    # 5. Non-US drives additionally get the country-specific files.
+    # 5. Copy and extract the airport archive into ARS\data\airport (same as the
+    #    packfiles build; ARS\data already exists from copy_region_files).
+    copy_airport(drive_path)
+
+    # 6. Non-US drives additionally get the country-specific files.
     if region != "u":
         copy_country_files(drive_path, iso)
 
-    # 6. Clean up the temporary dobDir.
+    # 7. Clean up the temporary dobDir.
     logging.info(f"Cleaning up {dobdir_path}...")
     try:
         shutil.rmtree(dobdir_path)
@@ -1564,7 +1881,7 @@ def process_country_drive(job):
         logging.error(f"FAILED to delete directory {dobdir_path}. Exception details: {e}")
 
     logging.info(f"========== Finished COUNTRY-DRIVE processing for {drive_path} ==========")
-    return False
+    return (False, True)
 
 
 def _append_gitlog(message):
@@ -2029,21 +2346,28 @@ def worker_thread(drive_queue, status_mgr):
 
             logging.info(f"Worker picked up drive: {drive_path} (Name: {vol_name}, kind: {kind})")
 
-            # Both processors update status numbers during their execution.
+            # Both processors update status numbers during their execution and
+            # return either None (packfiles drive that had nothing to do) or a
+            # (had_issues, verified) tuple.
             if kind == "country":
-                had_issues = process_country_drive(job)
+                result = process_country_drive(job)
             else:
-                had_issues = process_drive(drive_path)
+                result = process_drive(drive_path)
 
             # A country build assigns the drive letter during formatting, so read
             # the final path back off the job for the eject step.
             final_path = job.get("path") or drive_path
 
-            if had_issues is not None:
-                # Add to completed drives
-                status_mgr.add_completed_drive(vol_name, had_issues)
+            if result is not None:
+                had_issues, verified = result
+                # Record the drive: the verified flag (imagery completeness) is
+                # stored alongside the issues flag in completedDrives.csv.
+                status_mgr.add_completed_drive(vol_name, had_issues, verified)
 
-                # Set final status for this drive
+                # Set the final live status card. A drive that merely failed
+                # imagery verification (no copy issues) still ends like any normal
+                # completed drive (status 10) — the not-verified state is surfaced
+                # in the completed-drives history, not the live card.
                 if had_issues:
                     status_mgr.update(status_number=11)
                 else:

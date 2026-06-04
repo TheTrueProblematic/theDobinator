@@ -309,6 +309,87 @@ export const ASSERTIONS = [
   },
 
   {
+    name: 'Running=1, Status=12 shows verifying imagery with spinner',
+    state: { Running: 1, StatusNumber: 12 },
+    check(doc) {
+      const r = bodyAttrs(doc, 1, 12); if (!r.passed) return r;
+      if (!$(doc, '.spinner')) return fail('spinner missing');
+      if (!/verifying imagery/i.test($(doc, '.card').textContent)) return fail('expected "verifying imagery" copy');
+      return ok();
+    },
+  },
+
+  {
+    name: 'Running=1, Status=13 shows correcting missed imagery',
+    state: { Running: 1, StatusNumber: 13 },
+    check(doc) {
+      const r = bodyAttrs(doc, 1, 13); if (!r.passed) return r;
+      if (!/correcting missed imagery/i.test($(doc, '.card').textContent)) return fail('expected "correcting missed imagery" copy');
+      return ok();
+    },
+  },
+
+  {
+    name: 'Running=1, Status=14 with 2/4 main files renders 50% corrected-copy bar',
+    state: { Running: 1, StatusNumber: 14, CompletedMainFiles: 2, TotalMainFiles: 4 },
+    check(doc) {
+      const r = bodyAttrs(doc, 1, 14); if (!r.passed) return r;
+      if (!/corrected imagery/i.test($(doc, '.card').textContent)) return fail('expected "corrected imagery" copy');
+      const bar = $(doc, '[data-progress-bar]');
+      if (!bar || bar.style.width !== '50%') return fail(`expected 50% width, got "${bar && bar.style.width}"`);
+      return ok();
+    },
+  },
+
+  {
+    name: 'Completed history: verified drive is green, unverified is yellow with note',
+    state: { Running: 1, StatusNumber: 0, CompletedDrives: [
+      { name: 'GreenDrive', issues: false, verified: true, timestamp: '2099-12-31T10:00:00' },
+      { name: 'YellowDrive', issues: false, verified: false, timestamp: '2099-12-31T11:00:00' },
+    ] },
+    check(doc) {
+      const items = $$(doc, '#historyList .history-item');
+      if (items.length !== 2) return fail(`expected 2 history items, got ${items.length}`);
+      // List is reversed (last array entry shown first), so YellowDrive is item 0.
+      const yellow = items[0];
+      const green = items[1];
+      if (!yellow.classList.contains('is-warning')) return fail('unverified drive should be is-warning (yellow)');
+      if (!/not all imagery files were found/i.test(yellow.textContent)) return fail('expected missing-imagery note');
+      if (!green.classList.contains('is-success')) return fail('verified drive should be is-success (green)');
+      if (/not all imagery/i.test(green.textContent)) return fail('verified drive must not show the note');
+      return ok();
+    },
+  },
+
+  {
+    name: 'Completed history: two drives with the same name both render without error',
+    state: { Running: 1, StatusNumber: 0, CompletedDrives: [
+      { name: 'SameName', issues: false, verified: true, timestamp: '2099-12-31T10:00:00' },
+      { name: 'SameName', issues: false, verified: false, timestamp: '2099-12-31T11:00:00' },
+    ] },
+    check(doc) {
+      const items = $$(doc, '#historyList .history-item');
+      if (items.length !== 2) return fail(`expected 2 history items for duplicate names, got ${items.length}`);
+      if (!items[0].classList.contains('is-warning')) return fail('the unverified SameName should be yellow');
+      if (!items[1].classList.contains('is-success')) return fail('the verified SameName should be green');
+      return ok();
+    },
+  },
+
+  {
+    name: 'Completed history: legacy entries with no verified flag default to green',
+    state: { Running: 1, StatusNumber: 0, CompletedDrives: [
+      { name: 'LegacyDrive', issues: false, timestamp: '2099-12-31T09:00:00' },
+    ] },
+    check(doc) {
+      const item = $(doc, '#historyList .history-item');
+      if (!item) return fail('legacy history item missing');
+      if (!item.classList.contains('is-success')) return fail('legacy drive (no verified flag) should default to green');
+      return ok();
+    },
+  },
+
+  {
     name: 'Power button is always present in topbar',
     state: { Running: 1, StatusNumber: 0 },
     check(doc) {

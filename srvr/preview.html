@@ -65,6 +65,20 @@
         <div id="pendingList" class="modal-body"></div>
       </div>
     </div>
+
+    <!-- Completed Drives Modal (so the preview/test harness can render the list) -->
+    <div id="historyModal" class="modal hidden" aria-hidden="true">
+      <div class="modal-backdrop"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2 class="modal-title">Completed Drives</h2>
+          <div class="modal-header-actions">
+            <button id="clearCompletedBtn" class="modal-clear-btn">Clear</button>
+          </div>
+        </div>
+        <div id="historyList" class="modal-body"></div>
+      </div>
+    </div>
   </div>
 
   <script type="module">

@@ -71,9 +71,12 @@
       <div class="modal-content">
         <div class="modal-header">
           <h2 class="modal-title">Completed Drives</h2>
-          <button id="closeHistoryBtn" class="modal-close" aria-label="Close modal">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
-          </button>
+          <div class="modal-header-actions">
+            <button id="clearCompletedBtn" class="modal-clear-btn" aria-label="Clear completed drives" title="Clear the list (drives stay recorded in the CSV)">Clear</button>
+            <button id="closeHistoryBtn" class="modal-close" aria-label="Close modal">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+          </div>
         </div>
         <div id="historyList" class="modal-body">
           <!-- Populated by JS -->

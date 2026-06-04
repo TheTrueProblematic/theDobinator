@@ -22,6 +22,9 @@ const STATE_BUTTONS = [
   { sn: 9,  label: '9 · Formatting' },
   { sn: 10, label: '10 · Success' },
   { sn: 11, label: '11 · Errors' },
+  { sn: 12, label: '12 · Verify imagery' },
+  { sn: 13, label: '13 · Correct imagery' },
+  { sn: 14, label: '14 · Copy corrected' },
 ];
 
 const state = {
