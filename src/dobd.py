@@ -941,8 +941,8 @@ def copy_country_files(drive_path, iso):
     The three sets (DRIVE = the working drive root):
       1. Imagery file(s)  U:\\ARS\\Data\\imagery\\GLOBAL\\COUNTRIES\\<iso>_*.esp
                           ->  DRIVE\\ARS\\data\\imagery\\
-      2. Vector folder    U:\\ARS\\Data\\vector\\Baseline\\<iso>
-                          ->  DRIVE\\ARS\\data\\vector\\<iso>
+      2. Vector contents  U:\\ARS\\Data\\vector\\Baseline\\<iso>\\*
+                          ->  DRIVE\\ARS\\data\\vector  (contents, NOT a \\<iso> subfolder)
       3. Geocode folder   U:\\ARS\\Data\\geocode\\<iso>
                           ->  DRIVE\\ARS\\data\\geocode\\<iso>
     """
@@ -975,9 +975,12 @@ def copy_country_files(drive_path, iso):
     else:
         logging.error(f"Imagery COUNTRIES source not found: {COUNTRY_IMAGERY_SRC}")
 
-    # 2. Vector folder: U:\ARS\Data\vector\Baseline\<iso> -> DRIVE\ARS\data\vector\<iso>
+    # 2. Vector: copy the CONTENTS of U:\ARS\Data\vector\Baseline\<iso> directly
+    #    into DRIVE\ARS\data\vector (NOT into a \<iso> subfolder). robocopy copies
+    #    the contents of the source dir into the dest dir, so omitting the <iso>
+    #    component lands the files at ...\data\vector\[files].
     vec_src = os.path.join(COUNTRY_VECTOR_SRC, iso_l)
-    commands.append(["robocopy", vec_src, os.path.join(vector_dst, iso_l), "/e"])
+    commands.append(["robocopy", vec_src, vector_dst, "/e"])
 
     # 3. Geocode folder: U:\ARS\Data\geocode\<iso> -> DRIVE\ARS\data\geocode\<iso>
     geo_src = os.path.join(COUNTRY_GEOCODE_SRC, iso_l)
