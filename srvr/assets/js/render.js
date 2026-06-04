@@ -443,9 +443,27 @@ function renderHistory(completedDrives = []) {
     const icon = isWarning ? ICONS.warn : ICONS.check;
     const label = hasIssues ? `${esc(drive.name)} Experienced Issues` : `${esc(drive.name)} Completed`;
     const when = formatTimestamp(drive.timestamp);
-    const note = !verified
-      ? `<div class="history-item-note">Not all imagery files were found.</div>`
-      : '';
+
+    // For a drive that failed imagery verification, show the note and — when we
+    // know which files were unavailable on the source drive — a collapsible list
+    // so the operator can tell a source-data gap from a bot miss without it
+    // crowding the row.
+    let note = '';
+    if (!verified) {
+      note = `<div class="history-item-note">Not all imagery files were found.</div>`;
+      const missing = Array.isArray(drive.missingImagery) ? drive.missingImagery.filter(Boolean) : [];
+      if (missing.length) {
+        const n = missing.length;
+        const summary = `${n} file${n === 1 ? '' : 's'} unavailable on the source drive`;
+        note += `
+          <details class="history-missing">
+            <summary class="history-missing-summary">${esc(summary)}</summary>
+            <ul class="history-missing-list">
+              ${missing.map(f => `<li>${esc(f)}</li>`).join('')}
+            </ul>
+          </details>`;
+      }
+    }
 
     return `
       <div class="history-item ${itemClass}">

@@ -362,6 +362,43 @@ export const ASSERTIONS = [
   },
 
   {
+    name: 'Completed history: unverified drive lists its unavailable imagery files',
+    state: { Running: 1, StatusNumber: 0, CompletedDrives: [
+      { name: 'GapDrive', issues: false, verified: false,
+        missingImagery: ['usa_faa_ifr_enr_gom_vertical_flight_ref_2025-04-17_37m.esp'],
+        timestamp: '2099-12-31T13:00:00' },
+    ] },
+    check(doc) {
+      const item = $(doc, '#historyList .history-item');
+      if (!item || !item.classList.contains('is-warning')) return fail('expected a yellow history item');
+      if (!/not all imagery files were found/i.test(item.textContent)) return fail('expected the imagery note');
+      const summary = $(doc, '#historyList .history-missing-summary');
+      if (!summary) return fail('expected a missing-imagery disclosure summary');
+      if (!/1 file unavailable on the source drive/i.test(summary.textContent)) {
+        return fail(`expected singular "1 file unavailable" summary, got "${summary.textContent}"`);
+      }
+      const items = $$(doc, '#historyList .history-missing-list li');
+      if (items.length !== 1) return fail(`expected 1 missing-file entry, got ${items.length}`);
+      if (!/gom_vertical_flight_ref/.test(items[0].textContent)) return fail('expected the gom filename listed');
+      return ok();
+    },
+  },
+
+  {
+    name: 'Completed history: verified drive shows no missing-imagery disclosure',
+    state: { Running: 1, StatusNumber: 0, CompletedDrives: [
+      { name: 'CleanDrive', issues: false, verified: true, missingImagery: [],
+        timestamp: '2099-12-31T14:00:00' },
+    ] },
+    check(doc) {
+      if ($(doc, '#historyList .history-missing')) return fail('verified drive must not show a missing-imagery disclosure');
+      const item = $(doc, '#historyList .history-item');
+      if (!item || !item.classList.contains('is-success')) return fail('expected a green history item');
+      return ok();
+    },
+  },
+
+  {
     name: 'Completed history: two drives with the same name both render without error',
     state: { Running: 1, StatusNumber: 0, CompletedDrives: [
       { name: 'SameName', issues: false, verified: true, timestamp: '2099-12-31T10:00:00' },

@@ -633,6 +633,58 @@ select.form-input { cursor: pointer; }
   margin-top: 0.1rem;
 }
 
+/* Collapsible "files unavailable on the source drive" disclosure under a
+   failed-verification history item. Subtle, themed in the warning color, and
+   scrolls instead of growing the row when many files are missing. */
+.history-missing {
+  margin-top: 0.4rem;
+}
+
+.history-missing-summary {
+  font-size: 0.8rem;
+  color: var(--warning);
+  cursor: pointer;
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  user-select: none;
+  opacity: 0.95;
+}
+
+.history-missing-summary::-webkit-details-marker { display: none; }
+
+.history-missing-summary::before {
+  content: "▸";
+  font-size: 0.7rem;
+  transition: transform .15s var(--ease);
+}
+
+.history-missing[open] .history-missing-summary::before {
+  transform: rotate(90deg);
+}
+
+.history-missing-list {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0.5rem 0.65rem;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warning) 25%, var(--card-border));
+  max-height: 9rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.history-missing-list li {
+  font-size: 0.75rem;
+  color: var(--muted);
+  word-break: break-all;
+  line-height: 1.4;
+}
+
 /* Header actions cluster (e.g. Clear + Close on the Completed Drives modal) */
 .modal-header-actions {
   display: flex;

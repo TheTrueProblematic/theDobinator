@@ -312,12 +312,13 @@ class StatusManager:
     def _load_recent_completed_drives(self, hours=24):
         """
         Read the permanent completedDrives.csv and return the entries that
-        completed within the last `hours` hours, newest last. Each entry is a
-        dict {name, issues, verified, timestamp} matching what the WebUI consumes.
+        completed within the last `hours` hours, newest last. Each entry is a dict
+        {name, issues, verified, missingImagery, timestamp} matching the WebUI.
 
-        CSV columns are: timestamp, name, issues(0/1), verified(0/1). The verified
-        column is newer — rows without it (and drives that never run imagery
-        verification, e.g. country drives) default to verified=True.
+        CSV columns: timestamp, name, issues(0/1), verified(0/1),
+        missingImagery("|"-joined filenames). The verified and missingImagery
+        columns are newer — rows without them (and drives that never run imagery
+        verification, e.g. country drives) default to verified=True / [].
         """
         recent = []
         if not os.path.exists(COMPLETED_DRIVES_CSV):
@@ -337,12 +338,18 @@ class StatusManager:
                     verified = True
                     if len(row) >= 4:
                         verified = row[3].strip().lower() in ("1", "true", "yes")
+                    missing_imagery = []
+                    if len(row) >= 5 and row[4].strip():
+                        missing_imagery = [m for m in row[4].split("|") if m.strip()]
                     try:
                         ts = datetime.datetime.fromisoformat(ts_str)
                     except ValueError:
                         continue
                     if ts >= cutoff:
-                        recent.append({"name": name, "issues": issues, "verified": verified, "timestamp": ts_str})
+                        recent.append({
+                            "name": name, "issues": issues, "verified": verified,
+                            "missingImagery": missing_imagery, "timestamp": ts_str,
+                        })
         except Exception as e:
             logging.error(f"Failed to read {COMPLETED_DRIVES_CSV}: {e}")
         return recent
@@ -355,22 +362,34 @@ class StatusManager:
             data["CompletedDrives"] = recent
             self._write_data(data)
 
-    def add_completed_drive(self, name, had_issues, verified=True):
+    def add_completed_drive(self, name, had_issues, verified=True, missing_imagery=None):
         """
         Permanently record a completed drive in completedDrives.csv (kept
         forever) and refresh the last-24h view exposed to the WebUI.
 
-        Columns: timestamp, name, issues(0/1), verified(0/1). `verified` is the
-        imagery-verification outcome (packfiles drives); country/no-packfiles
-        drives are recorded verified=True ("assumed verified").
+        Columns: timestamp, name, issues(0/1), verified(0/1),
+        missingImagery("|"-joined filenames). `verified` is the imagery-verification
+        outcome (packfiles drives); country/no-packfiles drives are recorded
+        verified=True with no missing imagery. `missing_imagery` may be full
+        "data\\imagery\\..." paths; only the filenames are stored for display.
         """
         ts = datetime.datetime.now().isoformat(timespec="seconds")
+        # Store just the filename (basename) of each missing entry — cleaner to show.
+        basenames = []
+        for entry in (missing_imagery or []):
+            base = str(entry).replace("/", "\\").split("\\")[-1].strip()
+            if base:
+                basenames.append(base)
         try:
             os.makedirs(os.path.dirname(COMPLETED_DRIVES_CSV), exist_ok=True)
             with open(COMPLETED_DRIVES_CSV, mode='a', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
-                writer.writerow([ts, name, "1" if had_issues else "0", "1" if verified else "0"])
-            logging.info(f"Recorded completed drive '{name}' (issues={bool(had_issues)}, verified={bool(verified)}) at {ts}")
+                writer.writerow([ts, name, "1" if had_issues else "0",
+                                 "1" if verified else "0", "|".join(basenames)])
+            logging.info(
+                f"Recorded completed drive '{name}' (issues={bool(had_issues)}, "
+                f"verified={bool(verified)}, missing_imagery={len(basenames)}) at {ts}"
+            )
         except Exception as e:
             logging.error(f"Failed to append to {COMPLETED_DRIVES_CSV}: {e}")
         self.refresh_completed_drives()
@@ -1389,6 +1408,24 @@ FIX_LOOP_MAX_RUNS = 5
 # Lines in a packfile that describe an imagery file start with this prefix.
 IMAGERY_PREFIX = "data\\imagery\\"
 
+# dobDir signal files exchanged between the verification steps and the LLMs:
+#  * missedImagery.txt  — written by the imagery JUDGE; the precise list of
+#                         imagery files still missing from the drive (the exact
+#                         targets handed to the corrective LLM).
+#  * couldNotFind.txt   — written by the corrective LLM; imagery files it
+#                         confirmed are genuinely absent from the U drive.
+MISSED_IMAGERY_FILE = "missedImagery.txt"
+COULD_NOT_FIND_FILE = "couldNotFind.txt"
+
+# The imagery JUDGE LLM. Small + fast (it only reasons over two short text lists),
+# so it runs the quickest model with a modest context. It exists because exact
+# string comparison can't tell "missing" from "present under a newer name" — copied
+# files routinely have newer dates/versions than the original packfile entry, so a
+# model has to judge "same product, different name". (matchFiles and the corrective
+# LLMs use their own, larger models.)
+JUDGE_LLM_MODEL = "openai/qwen/qwen3.6-27b"
+JUDGE_LLM_CONTEXT = 10000
+
 
 def _quit_ars():
     """Force-quit the ARS program (by image name, including child processes). Best-effort."""
@@ -1402,6 +1439,45 @@ def _quit_ars():
             )
         except Exception as e:
             logging.error(f"Failed to taskkill ARS process '{name}': {e}")
+
+
+def _snapshot_root_entries(drive_path):
+    """Capture the set of top-level names on the drive root (for scatter cleanup)."""
+    try:
+        return set(os.listdir(drive_path))
+    except Exception as e:
+        logging.error(f"Failed to snapshot root of {drive_path}: {e}")
+        return set()
+
+
+def _clean_root_scatter(drive_path, baseline_entries):
+    """
+    Remove files an LLM scattered onto the DRIVE ROOT during processing.
+
+    The matchFiles / fix_loop agents run with the drive root as their working
+    directory, so any scratch/notes/intermediate files they create (e.g.
+    iv_matched.txt, missing_files.txt, geocode_mappings.txt) land at the root and
+    would otherwise survive the dobDir cleanup. This removes only top-level FILES
+    that appeared *after* `baseline_entries` was captured — it never touches
+    directories (ARS, dobDir, System Volume Information), never touches files that
+    were already present (the original packfiles.txt, etc.), and preserves
+    ISSUES.md (the one intentional new root file).
+    """
+    try:
+        current = set(os.listdir(drive_path))
+    except Exception as e:
+        logging.error(f"Failed to list root of {drive_path} for scatter cleanup: {e}")
+        return
+    for name in (current - baseline_entries):
+        if name == "ISSUES.md":
+            continue
+        path = os.path.join(drive_path, name)
+        if os.path.isfile(path):
+            try:
+                os.remove(path)
+                logging.info(f"Removed stray root file left by an LLM: {path}")
+            except Exception as e:
+                logging.error(f"Failed to remove stray root file {path}: {e}")
 
 
 def generate_packfiles(drive_path):
@@ -1500,67 +1576,174 @@ def _read_imagery_lines(packfile_path):
     return entries
 
 
-def _write_missed_imagery(drive_path, intended, copied):
-    """Write dobDir\\missedImagery.txt describing the intended vs copied imagery sets."""
-    dobdir_path = os.path.join(drive_path, "dobDir")
-    missed_path = os.path.join(dobdir_path, "missedImagery.txt")
+def _imagery_lines_in_text(text):
+    """Extract the imagery entries (lines under data\\imagery\\) from arbitrary text."""
+    out = []
+    for raw in (text or "").splitlines():
+        s = raw.strip()
+        if s and s.replace("/", "\\").lower().startswith(IMAGERY_PREFIX):
+            out.append(s)
+    return out
+
+
+def _write_missing_list(path, missing):
+    """Write the precise missing-imagery list (one path per line) to `path`."""
     try:
-        os.makedirs(dobdir_path, exist_ok=True)
-        with open(missed_path, "w", encoding="utf-8") as f:
-            f.write("The intended set of imagery files was:\n\n")
-            f.write("\n".join(intended) + "\n\n")
-            f.write("Yet only these were copied:\n\n")
-            f.write("\n".join(copied) + "\n")
-        logging.info(f"Wrote missed-imagery report to {missed_path}")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(missing) + ("\n" if missing else ""))
     except Exception as e:
-        logging.error(f"Failed to write {missed_path}: {e}")
-    return missed_path
+        logging.error(f"Failed to write missing list {path}: {e}")
 
 
-def _imagery_is_complete(drive_path):
+def _clear_could_not_find(drive_path):
+    """Delete a stale couldNotFind.txt so each corrective run starts clean."""
+    p = os.path.join(drive_path, "dobDir", COULD_NOT_FIND_FILE)
+    try:
+        if os.path.exists(p):
+            os.remove(p)
+    except Exception as e:
+        logging.warning(f"Could not remove stale {p}: {e}")
+
+
+def _read_could_not_find(drive_path):
+    """Return the imagery files the corrective LLM reported as genuinely absent from U."""
+    p = os.path.join(drive_path, "dobDir", COULD_NOT_FIND_FILE)
+    if not os.path.exists(p):
+        return []
+    try:
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            return _imagery_lines_in_text(f.read())
+    except Exception as e:
+        logging.error(f"Failed to read {p}: {e}")
+        return []
+
+
+def _judge_missing_imagery(drive_path):
     """
-    Compare the original packfiles.txt against dobDir\\verify_packfiles.txt by
-    counting imagery entries (lines under data\\imagery\\). Returns True if the
-    drive has at least as many imagery files as the original asked for (verified),
-    or False if some are missing. On a discrepancy it (re)writes
-    dobDir\\missedImagery.txt so the corrective LLM has fresh input.
+    Determine which INTENDED imagery files are genuinely still missing from the
+    drive and write that precise list to dobDir\\missedImagery.txt (one
+    "data\\imagery\\..." path per line). Returns the list.
 
-    Shared core for compare_packfiles (initial check) and fix_loop (re-checks) so
-    completeness is always measured identically.
+    This is the verification gate (idea #3). It can't be a plain string diff:
+    copied files routinely carry a NEWER name than the original packfile entry
+    (newer date/version/resolution wording), so only a model can decide
+    "same product, different name". We use the small, fast JUDGE_LLM_MODEL for it.
+
+    Fast path: if every intended path is already present verbatim, nothing is
+    missing and no LLM is needed. Fallback: if the judge produces no usable output
+    but the counts disagree, fall back to a deterministic name diff so the
+    corrective stage still has a target list (the corrective LLM's no-substitute
+    rules keep an over-reported target harmless).
     """
+    status_mgr.update(status_number=12)
     dobdir_path = os.path.join(drive_path, "dobDir")
     original = os.path.join(drive_path, "packfiles.txt")
     verify = os.path.join(dobdir_path, "verify_packfiles.txt")
+    missed_path = os.path.join(dobdir_path, MISSED_IMAGERY_FILE)
 
     intended = _read_imagery_lines(original)
     copied = _read_imagery_lines(verify)
-    logging.info(f"Imagery check: packfiles.txt has {len(intended)} imagery entries, verify_packfiles.txt has {len(copied)}.")
+    logging.info(f"Imagery judge: {len(intended)} intended vs {len(copied)} on-drive imagery entries.")
 
-    if len(intended) > len(copied):
-        logging.warning(
-            f"Imagery discrepancy: {len(intended) - len(copied)} more imagery files intended than were copied."
-        )
-        _write_missed_imagery(drive_path, intended, copied)
-        return False
-    logging.info("Imagery verified: every intended imagery file is present.")
-    return True
+    # Fast, deterministic short-circuit: every intended path present verbatim.
+    copied_lower = set(c.lower() for c in copied)
+    if intended and all(i.lower() in copied_lower for i in intended):
+        logging.info("Imagery judge: all intended files present verbatim; nothing missing.")
+        _write_missing_list(missed_path, [])
+        return []
+    if not intended:
+        logging.info("Imagery judge: packfiles lists no imagery; nothing to verify.")
+        _write_missing_list(missed_path, [])
+        return []
+
+    # Remove any stale judge output so we can tell whether the judge wrote a fresh one.
+    try:
+        if os.path.exists(missed_path):
+            os.remove(missed_path)
+    except Exception:
+        pass
+
+    intended_block = "\n".join(intended)
+    copied_block = "\n".join(copied) if copied else "(none)"
+    prompt = (
+        "You are a meticulous data-verification assistant helping confirm that a data drive received "
+        "all of its imagery files. Do NOT copy, move, rename, or modify any files — your ONLY job is to "
+        "compare two lists and write one short output file.\n\n"
+        "LIST A is the set of imagery files this drive was SUPPOSED to contain (from the original "
+        "packfile). LIST B is the set of imagery files ACTUALLY on the drive right now.\n\n"
+        "A file in LIST A should be treated as PRESENT if LIST B contains the SAME imagery product, even "
+        "when the filename is not identical. Filenames legitimately drift: a file on the drive may have a "
+        "newer date, a newer version number, a different resolution token (e.g. 30cm vs 61cm), or an "
+        "added/removed word such as \"naip\". Two entries are the SAME product when they clearly describe "
+        "the same geographic coverage and the same kind of imagery (for example the same country / state / "
+        "region and the same data type or chart), differing only in those date / version / resolution "
+        "details.\n\n"
+        "A file in LIST A is MISSING only when LIST B contains NO entry that plausibly represents that "
+        "same product. When unsure whether two entries are the same product, lean towards treating it as "
+        "PRESENT (do not flag a file as missing on a guess).\n\n"
+        "LIST A — INTENDED:\n"
+        f"{intended_block}\n\n"
+        "LIST B — ON THE DRIVE NOW:\n"
+        f"{copied_block}\n\n"
+        "Go through LIST A one entry at a time and decide whether a matching product exists in LIST B. "
+        f"Then write ONLY the MISSING LIST A entries to the file dobDir\\{MISSED_IMAGERY_FILE} (the dobDir "
+        "folder is inside your current working directory). Write each missing file on its own line, copied "
+        "EXACTLY as it appears in LIST A (the full \"data\\imagery\\...\" path). Write nothing else — no "
+        "headers, numbering, commentary, or blank padding. If every LIST A file has a match in LIST B, "
+        f"create dobDir\\{MISSED_IMAGERY_FILE} as an empty file."
+    )
+    logging.info(f"Running imagery judge (model={JUDGE_LLM_MODEL}, ctx={JUDGE_LLM_CONTEXT}).")
+    judge_llm = LLM(working_directory=drive_path, model=JUDGE_LLM_MODEL, context_window=JUDGE_LLM_CONTEXT)
+    judge_llm.use(prompt)
+
+    missing = []
+    judged = os.path.exists(missed_path)
+    if judged:
+        try:
+            with open(missed_path, "r", encoding="utf-8", errors="replace") as f:
+                missing = _imagery_lines_in_text(f.read())
+        except Exception as e:
+            logging.error(f"Failed to read judge output {missed_path}: {e}")
+            judged = False
+
+    if not judged:
+        # Judge gave us nothing usable — fall back to a deterministic name diff so
+        # the corrective stage still has a target list to work from.
+        logging.warning("Imagery judge produced no usable output; falling back to a deterministic name diff.")
+        missing = [i for i in intended if i.lower() not in copied_lower]
+        _write_missing_list(missed_path, missing)
+
+    logging.info(f"Imagery judge: {len(missing)} imagery file(s) still missing.")
+    return missing
 
 
 def compare_packfiles(drive_path):
     """
-    Initial imagery verification: compare packfiles.txt with the freshly generated
-    verify_packfiles.txt (imagery counts). If every intended imagery file is
-    present the drive is verified. Otherwise the shared core writes
-    missedImagery.txt and fix_loop(run 1) is started to recover the missing files.
+    Initial imagery verification. The imagery judge produces the precise list of
+    still-missing imagery (dobDir\\missedImagery.txt). If nothing is missing the
+    drive is verified; otherwise fix_loop(run 1) is started to recover the files.
 
-    Returns True if the drive is verified, False otherwise.
+    Returns (verified, missing_imagery) — see fix_loop.
     """
     logging.info("--- Starting compare_packfiles Process ---")
-    if _imagery_is_complete(drive_path):
+    missing = _judge_missing_imagery(drive_path)
+    if not missing:
         logging.info("--- compare_packfiles: drive verified, no fix needed ---")
-        return True
-    logging.warning("compare_packfiles found missing imagery; entering fix_loop.")
+        return (True, [])
+    logging.warning(f"compare_packfiles found {len(missing)} missing imagery file(s); entering fix_loop.")
     return fix_loop(drive_path, 1)
+
+
+# Models used for the imagery-correction LLMs. Deliberately DIFFERENT from the
+# initial matchFiles model (openai/qwen/qwen3.6-27b) so each stage varies the
+# model: the first four correction passes use the larger qwen MoE; the fifth and
+# final pass switches to gemma — changing variables to maximize the chance of a
+# correct result. (matchFiles is intentionally left on its own model.)
+FIX_LLM_MODEL = "openai/qwen/qwen3.6-35b-a3b"
+FIX_LLM_CONTEXT = 40000
+FINAL_FIX_LLM_MODEL = "openai/google/gemma-4-31b"
+FINAL_FIX_LLM_CONTEXT = 10000
 
 
 def _run_fix_llm(drive_path, run_number):
@@ -1568,10 +1751,17 @@ def _run_fix_llm(drive_path, run_number):
     Spin up a fresh LLM on the drive root to produce dobDir\\extraMapping{n}.csv
     from missedImagery.txt, quoting the original matchFiles prompt as the previous
     agent's goal.
+
+    Model varies by run: runs 1..(MAX-1) use FIX_LLM_MODEL @ FIX_LLM_CONTEXT, and
+    the final run (MAX) uses FINAL_FIX_LLM_MODEL @ FINAL_FIX_LLM_CONTEXT.
     """
     status_mgr.update(status_number=13)
-    logging.info(f"--- fix_loop run {run_number}: launching corrective LLM ---")
-    fix_llm = LLM(working_directory=drive_path)
+    if run_number >= FIX_LOOP_MAX_RUNS:
+        model, context_window = FINAL_FIX_LLM_MODEL, FINAL_FIX_LLM_CONTEXT
+    else:
+        model, context_window = FIX_LLM_MODEL, FIX_LLM_CONTEXT
+    logging.info(f"--- fix_loop run {run_number}: launching corrective LLM (model={model}, ctx={context_window}) ---")
+    fix_llm = LLM(working_directory=drive_path, model=model, context_window=context_window)
     prompt = (
         "An AI agent, much like you, was just run on this drive with this as its prompt and goal:\n\n"
         "-------------------- PREVIOUS AGENT'S PROMPT --------------------\n"
@@ -1579,13 +1769,41 @@ def _run_fix_llm(drive_path, run_number):
         "---\n\n"
         "It thought that it got all of the files but I found some discrepancies. You are being run on "
         "the root of the drive we are working on, and there is a subfolder called dobDir with a file in "
-        "it called missedImagery.txt. Look through this file to see which imagery files are missing and "
-        "work to find them and create a new mapping csv for them. Put this mapping csv in dobDir and "
-        f"call it extraMapping{run_number}.csv.\n\n"
-        "Given all of this, your task is to slowly, carefully, with extreme precision find any errors "
-        "that the initial agent could have caused and correct them. Read the initial prompt carefully so "
-        "you don't make any errors. Try as hard as you can to get this perfect. It matters a lot to me "
-        "that you do this right and you have to nail it! PLEASE!!!"
+        f"it called {MISSED_IMAGERY_FILE}.\n\n"
+        f"dobDir\\{MISSED_IMAGERY_FILE} contains the EXACT list of imagery files that are still missing "
+        "from this drive — one \"data\\imagery\\...\" path per line. These, and ONLY these, are the files "
+        "you must find on the U drive. (The list has already been narrowed down for you, accounting for "
+        "files that are present under a newer name — so do not second-guess it; just find the listed "
+        "files.) For each one, find its genuine source on the U drive and add it to a new mapping csv in "
+        f"dobDir called extraMapping{run_number}.csv.\n\n"
+        "CRITICAL RULES — read these carefully, they matter enormously:\n"
+        f"1. OUTPUT FORMAT: The ONLY mapping file you create is dobDir\\extraMapping{run_number}.csv. It "
+        "must be a real CSV with exactly two columns per row — the source path on the U drive, then the "
+        "destination path on this drive — and NO header row. Do NOT write any notes, logs, or other "
+        "intermediate/scratch output. If you absolutely must create a temporary file, it MUST live inside "
+        "the dobDir folder — NEVER create any file at the root of the drive.\n"
+        "2. NEVER RENAME A FILE: The destination filename must be EXACTLY, character-for-character, the "
+        "same as the source filename you found on the U drive. Only the folder/location changes between "
+        "source and destination — the filename itself must NEVER change. If the source is "
+        "\"U:\\...\\foo_2026.esp\", the destination must also end in \"foo_2026.esp\".\n"
+        "3. NEVER SUBSTITUTE A DIFFERENT FILE: Only add a row if you are CERTAIN the U-drive file is the "
+        "genuine, correct match for the missing file (the same data product, just possibly a newer date). "
+        "Do NOT fuzzy-match to a different file to fill a gap. Matching one state / region / county to "
+        "another (for example a Texas chart to a Tennessee file), or one FAA chart to a different FAA "
+        "chart, is strictly forbidden and is far worse than doing nothing.\n"
+        "4. IF A FILE IS GENUINELY NOT ON U, REPORT IT: For any missing file that — after a careful, "
+        "honest search of the imagery folders under U:\\ARS\\Data\\... — you are confident simply does "
+        "NOT exist anywhere on the U drive, do TWO things: (a) leave it out of the CSV (never force or "
+        f"guess a match), and (b) append its exact \"data\\imagery\\...\" line to a file called dobDir\\"
+        f"{COULD_NOT_FIND_FILE} (one per line). Some files legitimately do not exist on U — recording them "
+        f"in {COULD_NOT_FIND_FILE} tells us the file is truly unavailable rather than that you gave up. "
+        "Only list a file there if you are confident it is genuinely absent; if you are merely unsure, "
+        "leave it out of BOTH files so another attempt can try.\n\n"
+        "Given all of this, your task is to slowly, carefully, with extreme precision find any errors that "
+        "the initial agent could have caused and correct them. Read the initial prompt carefully so you "
+        "don't make any errors. Try as hard as you can to get this perfect, but remember: it is far better "
+        "to leave a file out (and report it) than to copy the wrong file. It matters a lot to me that you "
+        "do this right and you have to nail it! PLEASE!!!"
     )
     logging.info(f"Sending corrective prompt to LLM (run {run_number}).")
     fix_llm.use(prompt)
@@ -1595,39 +1813,65 @@ def fix_loop(drive_path, run_number):
     """
     Attempt to recover missing imagery files, up to FIX_LOOP_MAX_RUNS times.
 
-    run 1 (entered straight from compare_packfiles, with missedImagery.txt already
-      written): ask the LLM for extraMapping1.csv, copy it, then recurse to run 2.
-    runs 2..(MAX-1): first re-verify (generate_packfiles + imagery compare). If the
-      imagery is now complete, the drive is verified and we stop. Otherwise ask the
-      LLM for extraMapping{n}.csv, copy it, then recurse to run n+1.
-    run MAX (5): same start as the middle runs; if still incomplete, do a FINAL
-      re-verify after the copy and return its result. This is the last attempt — a
-      False here means the drive is recorded completed-but-not-verified.
+    run 1 (entered straight from compare_packfiles, with the judge's precise
+      missedImagery.txt already written): ask the corrective LLM for
+      extraMapping1.csv, copy it, then recurse to run 2.
+    runs 2..(MAX-1): first re-verify (generate_packfiles + judge). If nothing is
+      missing the drive is verified and we stop. Otherwise run the corrective LLM
+      for extraMapping{n}.csv, copy it, then recurse to run n+1.
+    run MAX (5): same start; if still missing, do a FINAL re-verify after the copy
+      and return its result. This is the last attempt — a False here means the
+      drive is recorded completed-but-not-verified.
 
-    Returns True if the drive ends up verified, False if all attempts are exhausted
-    without recovering every imagery file.
+    Early exit (idea #2): after any corrective run, if the LLM CONFIRMED one or
+    more missing imagery files are genuinely absent from the U drive
+    (couldNotFind.txt), no later model/run can recover them, so we stop immediately
+    and record the drive unverified — rather than burning the remaining runs.
+
+    Returns (verified, missing_imagery): `verified` is True/False; `missing_imagery`
+    is the list of imagery files still not on the drive when it ends unverified
+    (empty when verified) — surfaced to the operator in the WebUI.
     """
     logging.info(f"========== fix_loop run {run_number}/{FIX_LOOP_MAX_RUNS} ==========")
 
     # Every run after the first begins by re-checking whether the prior copy fixed
-    # things (regenerate packfiles via ARS and re-count imagery).
+    # things (regenerate packfiles via ARS, then re-judge the missing set).
     if run_number > 1:
-        generate_packfiles(drive_path)
-        if _imagery_is_complete(drive_path):
+        if not generate_packfiles(drive_path):
+            logging.warning("Could not regenerate packfiles during fix_loop; assuming verified to avoid blocking the drive.")
+            return (True, [])
+        if not _judge_missing_imagery(drive_path):
             logging.info(f"fix_loop run {run_number}: imagery now complete; drive verified.")
-            return True
+            return (True, [])
 
-    # Produce and copy a corrective mapping for this run.
+    # Produce and copy a corrective mapping for this run (and let the LLM record any
+    # genuinely-absent files in couldNotFind.txt).
+    _clear_could_not_find(drive_path)
     _run_fix_llm(drive_path, run_number)
     extra_csv = os.path.join(drive_path, "dobDir", f"extraMapping{run_number}.csv")
     _copy_from_mapping(drive_path, extra_csv, status_number=14, issues_filename=None)
 
+    # Idea #2: a confirmed-absent file can never be recovered, so stop now and
+    # report exactly those files as the ones unavailable on the source drive.
+    could_not_find = _read_could_not_find(drive_path)
+    if could_not_find:
+        logging.warning(
+            f"Corrective LLM confirmed {len(could_not_find)} imagery file(s) are genuinely absent from U; "
+            "marking drive UNVERIFIED without further runs."
+        )
+        for f in could_not_find:
+            logging.warning(f"  unavailable on U: {f}")
+        return (False, could_not_find)
+
     if run_number >= FIX_LOOP_MAX_RUNS:
         # Final attempt: re-verify one last time after the copy.
-        generate_packfiles(drive_path)
-        verified = _imagery_is_complete(drive_path)
+        if not generate_packfiles(drive_path):
+            logging.warning("Could not regenerate packfiles for the final check; assuming verified.")
+            return (True, [])
+        final_missing = _judge_missing_imagery(drive_path)
+        verified = not final_missing
         logging.info(f"fix_loop final run complete; verified={verified}.")
-        return verified
+        return (verified, [] if verified else final_missing)
 
     return fix_loop(drive_path, run_number + 1)
 
@@ -1644,7 +1888,9 @@ def verifySuccess(drive_path):
          missing) we skip verification and assume verified rather than blocking the
          drive on missing tooling.
 
-    Returns (issues_found, verified).
+    Returns (issues_found, verified, missing_imagery) — missing_imagery is the
+    list of imagery files still unavailable when the drive ends unverified (empty
+    otherwise), surfaced to the operator in the WebUI.
     """
     logging.info("--- Starting verifySuccess Process ---")
     dobdir_path = os.path.join(drive_path, "dobDir")
@@ -1660,13 +1906,14 @@ def verifySuccess(drive_path):
 
     # --- Imagery verification (regenerate packfiles, compare, recover) ----------
     verified = True
+    missing_imagery = []
     if generate_packfiles(drive_path):
-        verified = compare_packfiles(drive_path)
+        verified, missing_imagery = compare_packfiles(drive_path)
     else:
         logging.warning("Could not regenerate packfiles for verification; assuming verified.")
 
-    logging.info(f"--- Finished verifySuccess Process (issues={issues_found}, verified={verified}) ---")
-    return issues_found, verified
+    logging.info(f"--- Finished verifySuccess Process (issues={issues_found}, verified={verified}, missing={len(missing_imagery)}) ---")
+    return issues_found, verified, missing_imagery
 
 def process_drive(drive_path):
     """Process a newly connected drive."""
@@ -1695,7 +1942,7 @@ def process_drive(drive_path):
             logging.info(f"SUCCESS: Deleted existing directory {dobdir_path}")
         except Exception as e:
             logging.error(f"FAILED to delete existing directory {dobdir_path}. Exception details: {e}")
-            return (True, True)
+            return (True, True, [])
 
     logging.info(f"Attempting to create dobDir on {drive_path}...")
     try:
@@ -1703,12 +1950,16 @@ def process_drive(drive_path):
         logging.info(f"SUCCESS: Created directory {dobdir_path}")
     except Exception as e:
         logging.error(f"FAILED to create directory {dobdir_path}. Exception details: {e}")
-        return (True, True)
-    
+        return (True, True, [])
+
+    # Snapshot the root now (dobDir + original packfiles + ARS-to-be) so we can
+    # clean up any scratch files the LLM stages scatter onto the drive root later.
+    root_baseline = _snapshot_root_entries(drive_path)
+
     # Initialize the workVars.csv file in the dobDir directory
     workvars_path = os.path.join(dobdir_path, "workVars.csv")
     work_vars = WorkVars(workvars_path)
-    
+
     # Instantiate the LLM and run the classifyRegion function
     dobsy = LLM()
     classifyRegion(dobsy, drive_path, work_vars)
@@ -1726,7 +1977,11 @@ def process_drive(drive_path):
     mainCopy(drive_path)
     
     # Verify success: handle copy issues AND verify the imagery set is complete.
-    issues_found, verified = verifySuccess(drive_path)
+    issues_found, verified, missing_imagery = verifySuccess(drive_path)
+
+    # Remove any scratch files the LLM stages scattered onto the drive root so the
+    # finished drive only carries the real build output (+ ISSUES.md if relevant).
+    _clean_root_scatter(drive_path, root_baseline)
 
     logging.info(f"Cleaning up {dobdir_path}...")
     try:
@@ -1736,7 +1991,7 @@ def process_drive(drive_path):
         logging.error(f"FAILED to delete directory {dobdir_path}. Exception details: {e}")
 
     logging.info(f"========== Finished initial processing for {drive_path} ==========")
-    return (issues_found, verified)
+    return (issues_found, verified, missing_imagery)
 
 
 def initialize_and_format_disk(disk_number, label, expected_tb=0, serial=""):
@@ -1819,9 +2074,10 @@ def process_country_drive(job):
          (status 8, via copy_country_files).
       6. Clean up dobDir and report the drive completed.
 
-    Returns (had_issues, verified). Country drives have no packfiles, so they are
-    always "assumed verified" (verified=True); had_issues is False on a clean
-    completion or True if the drive could not be prepared/formatted.
+    Returns (had_issues, verified, missing_imagery). Country drives have no
+    packfiles, so they are always "assumed verified" (verified=True) with an empty
+    missing_imagery list; had_issues is False on a clean completion or True if the
+    drive could not be prepared/formatted.
     """
     iso = (job.get("iso") or "").upper()
     name = job.get("name") or "DRIVE"
@@ -1835,7 +2091,7 @@ def process_country_drive(job):
     )
     if not drive_path:
         logging.error(f"Could not format disk #{disk_number}; aborting this build.")
-        return (True, True)  # flag as completed-with-issues so the operator notices
+        return (True, True, [])  # flag as completed-with-issues so the operator notices
     # Record the assigned path on the job so the worker can eject the right drive.
     job["path"] = drive_path
 
@@ -1848,13 +2104,13 @@ def process_country_drive(job):
             shutil.rmtree(dobdir_path)
         except Exception as e:
             logging.error(f"FAILED to delete existing directory {dobdir_path}. Exception details: {e}")
-            return (True, True)
+            return (True, True, [])
     try:
         os.makedirs(dobdir_path)
         logging.info(f"SUCCESS: Created directory {dobdir_path}")
     except Exception as e:
         logging.error(f"FAILED to create directory {dobdir_path}. Exception details: {e}")
-        return (True, True)
+        return (True, True, [])
 
     work_vars = WorkVars(os.path.join(dobdir_path, "workVars.csv"))
 
@@ -1884,7 +2140,7 @@ def process_country_drive(job):
         logging.error(f"FAILED to delete directory {dobdir_path}. Exception details: {e}")
 
     logging.info(f"========== Finished COUNTRY-DRIVE processing for {drive_path} ==========")
-    return (False, True)
+    return (False, True, [])
 
 
 def _append_gitlog(message):
@@ -2351,7 +2607,7 @@ def worker_thread(drive_queue, status_mgr):
 
             # Both processors update status numbers during their execution and
             # return either None (packfiles drive that had nothing to do) or a
-            # (had_issues, verified) tuple.
+            # (had_issues, verified, missing_imagery) tuple.
             if kind == "country":
                 result = process_country_drive(job)
             else:
@@ -2362,10 +2618,10 @@ def worker_thread(drive_queue, status_mgr):
             final_path = job.get("path") or drive_path
 
             if result is not None:
-                had_issues, verified = result
-                # Record the drive: the verified flag (imagery completeness) is
-                # stored alongside the issues flag in completedDrives.csv.
-                status_mgr.add_completed_drive(vol_name, had_issues, verified)
+                had_issues, verified, missing_imagery = result
+                # Record the drive: the verified flag (imagery completeness) and the
+                # list of imagery still unavailable are stored in completedDrives.csv.
+                status_mgr.add_completed_drive(vol_name, had_issues, verified, missing_imagery)
 
                 # Set the final live status card. A drive that merely failed
                 # imagery verification (no copy issues) still ends like any normal
