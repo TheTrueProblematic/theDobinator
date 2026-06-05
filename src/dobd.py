@@ -2185,6 +2185,53 @@ def get_github_pat():
         return ""
 
 
+def get_local_head_sha():
+    """
+    Return the local checked-out commit SHA (lowercase hex) of the working tree,
+    or None if it can't be determined.
+
+    Reads git's plumbing files directly (.git/HEAD -> loose ref or packed-refs)
+    rather than shelling out to git.exe, because the watcher runs inside a
+    logon-spawned process where git is frequently not on PATH (the same reason
+    git_update.py uses find_git_executable). This is what lets the WebUI keep
+    showing "update pending" after a power cycle: we compare this local SHA to
+    the remote HEAD instead of only noticing pushes that happen while running.
+    """
+    git_dir = os.path.join(PROJECT_ROOT, ".git")
+    try:
+        with open(os.path.join(git_dir, "HEAD"), "r", encoding="utf-8") as f:
+            head = f.read().strip()
+    except Exception:
+        return None
+
+    # Detached HEAD: the file holds the SHA directly.
+    if not head.startswith("ref:"):
+        return head.lower() or None
+
+    ref = head[4:].strip()  # e.g. "refs/heads/main"
+    # 1) Loose ref file (.git/refs/heads/main).
+    try:
+        with open(os.path.join(git_dir, *ref.split("/")), "r", encoding="utf-8") as f:
+            sha = f.read().strip()
+        if sha:
+            return sha.lower()
+    except Exception:
+        pass
+    # 2) Packed refs (.git/packed-refs) — common right after a clone/reset.
+    try:
+        with open(os.path.join(git_dir, "packed-refs"), "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or line.startswith("^"):
+                    continue
+                parts = line.split(" ", 1)
+                if len(parts) == 2 and parts[1].strip() == ref:
+                    return parts[0].strip().lower()
+    except Exception:
+        pass
+    return None
+
+
 class UpdateWatcher:
     """
     Polls GitHub for new commits using cheap HTTP conditional requests so the
@@ -2193,8 +2240,11 @@ class UpdateWatcher:
 
     Approach (matches the rate-limit-free local watcher pattern):
       * First request has no validator -> GitHub returns 200 + an ETag. We
-        store that ETag as our baseline and do NOT flag an update (this is
-        simply the version we are already running).
+        store that ETag as our baseline AND compare the remote HEAD commit SHA
+        to our LOCAL checked-out SHA. If they differ, an update was already
+        pending before we started (e.g. the operator powered off without
+        applying it), so we flag it immediately. This is the fix for the bug
+        where power-cycling theDobinator hid a still-pending update.
       * Every later request sends the stored ETag back in If-None-Match.
           - 304 Not Modified  -> nothing changed, costs nothing.
           - 200 OK            -> a new push happened. We refresh the stored
@@ -2245,23 +2295,26 @@ class UpdateWatcher:
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 new_etag = resp.headers.get("ETag")
-                resp.read()  # drain the body so the connection can be reused/closed
+                body = resp.read()  # drain the body (and parse the latest SHA)
+                remote_sha = self._parse_latest_sha(body)
                 if self.etag is None:
-                    # Establish the baseline; this is the version we run now.
+                    # Establish the ETag baseline, then decide availability by
+                    # comparing the remote HEAD to our LOCAL checked-out commit.
+                    # If we restarted while behind origin/main, local != remote
+                    # and the update must still show as pending.
                     self.etag = new_etag
-                    plog.debug(f"GitHub update watcher baseline ETag set: {new_etag}")
+                    local_sha = get_local_head_sha()
+                    plog.debug(
+                        f"GitHub update watcher baseline: etag={new_etag} "
+                        f"remote={remote_sha} local={local_sha}"
+                    )
+                    if remote_sha and local_sha and remote_sha.lower() != local_sha.lower():
+                        plog.warning("Local commit is behind origin/main; an update is already pending.")
+                        self._flag_update_available()
                 else:
                     # 200 with a previously-known ETag => a genuinely new push.
                     self.etag = new_etag
-                    self.update_available = True
-                    self.status_mgr.set_update_available(True)
-                    plog.warning("A new version of theDobinator is available on GitHub.")
-                    # Decide whether this incoming update needs a full PC restart
-                    # by reading the remote reboot-required flag.
-                    reboot = self._fetch_reboot_required()
-                    self.status_mgr.set_reboot_required(reboot)
-                    if reboot:
-                        plog.warning("The available update is flagged as REQUIRING A PC RESTART.")
+                    self._flag_update_available()
         except urllib.error.HTTPError as e:
             if e.code == 304:
                 plog.debug("GitHub update check: 304 Not Modified (up to date).")
@@ -2269,6 +2322,28 @@ class UpdateWatcher:
                 plog.warning(f"GitHub update check HTTP error {e.code}: {e.reason}")
         except Exception as e:
             plog.debug(f"GitHub update check network error (non-fatal): {e}")
+
+    def _parse_latest_sha(self, body):
+        """Pull the newest commit SHA out of the /commits?per_page=1 response."""
+        try:
+            data = json.loads(body.decode("utf-8", errors="replace"))
+            if isinstance(data, list) and data:
+                return str(data[0].get("sha", "")).strip() or None
+        except Exception as e:
+            plog.debug(f"Could not parse latest commit SHA: {e}")
+        return None
+
+    def _flag_update_available(self):
+        """Raise the WebUI update indicator and decide if it needs a PC restart."""
+        self.update_available = True
+        self.status_mgr.set_update_available(True)
+        plog.warning("A new version of theDobinator is available on GitHub.")
+        # Decide whether this incoming update needs a full PC restart by reading
+        # the remote reboot-required flag.
+        reboot = self._fetch_reboot_required()
+        self.status_mgr.set_reboot_required(reboot)
+        if reboot:
+            plog.warning("The available update is flagged as REQUIRING A PC RESTART.")
 
     def _fetch_reboot_required(self):
         """
