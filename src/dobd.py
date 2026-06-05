@@ -961,6 +961,72 @@ class LLM:
             llmlog.error(f"LLM RUN FINISHED WITH EXIT CODE {rc}.")
         return rc
 
+    def chat_text(self, prompt, max_tokens=None):
+        """Run a single prompt as a DIRECT chat completion (NO Open Interpreter)
+        and return the assistant's text reply, or None on failure.
+
+        For pure reasoning tasks that need no filesystem or code execution — the
+        imagery judge just compares two lists it is handed — this is dramatically
+        more reliable than the Open Interpreter path. Under OI the model has to
+        *write its answer to a file via executed Python*, and it frequently just
+        replies in chat instead, leaving no file (which used to force the harmful
+        exact-string fallback). A direct call removes that failure mode entirely:
+        we read the model's answer straight from the response. Reuses the same
+        preflight + retry as useLoc. Logs usage to contextLog.log.
+        """
+        url = f"http://{self.ip_address}:{self.port}/v1/chat/completions"
+        body = json.dumps({
+            "model": self.model.split("openai/", 1)[-1],
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": int(max_tokens or self.max_tokens),
+            "temperature": 0,
+            "stream": False,
+        }).encode("utf-8")
+        attempts = max(1, int(self.max_attempts))
+        for attempt in range(1, attempts + 1):
+            self._preflight()
+            llmlog.info("=" * 70)
+            llmlog.info(f"LLM DIRECT CALL — model={self.model}  attempt={attempt}/{attempts}")
+            if attempt == 1:
+                llmlog.info(f"PROMPT: {prompt}")
+            try:
+                req = urllib.request.Request(
+                    url, data=body, method="POST",
+                    headers={"Content-Type": "application/json",
+                             "Authorization": f"Bearer {self.api_key}"},
+                )
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    data = json.loads(resp.read().decode("utf-8", errors="replace"))
+                text = ((data.get("choices") or [{}])[0].get("message", {}) or {}).get("content", "") or ""
+                self._log_direct_usage(data.get("usage") or {})
+                llmlog.debug(f"DIRECT RESPONSE:\n{text}")
+                llmlog.info("LLM DIRECT CALL FINISHED OK.")
+                return text
+            except Exception as e:
+                logging.error(f"Direct LLM call attempt {attempt}/{attempts} failed: {e}")
+                llmlog.error(f"LLM DIRECT CALL attempt {attempt}/{attempts} failed: {e}")
+                if attempt < attempts:
+                    time.sleep(5)
+        clog.warning(
+            f"context=UNKNOWN (direct call failed) | model={self.model} | "
+            f"window={self.context_window} tokens | dir=(direct)"
+        )
+        return None
+
+    def _log_direct_usage(self, usage):
+        """Log contextLog.log usage for a direct chat completion using the
+        server's own token accounting (prompt + completion tokens)."""
+        try:
+            total = int(usage.get("total_tokens")
+                        or (usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)))
+            pct = (total / self.context_window * 100.0) if self.context_window else 0.0
+            clog.info(
+                f"context={pct:.1f}% used | model={self.model} | "
+                f"window={self.context_window} tokens | used={total} tokens | dir=(direct)"
+            )
+        except Exception as e:
+            logging.debug(f"Failed to log direct context usage: {e}")
+
 
 
 def is_admin():
@@ -1932,6 +1998,51 @@ def _read_could_not_find(drive_path):
         return []
 
 
+def _normalize_product_key(path):
+    """Reduce an imagery filename to a coarse 'product identity' key by stripping
+    the tokens that legitimately drift between an old packfile entry and the file
+    actually copied — dates, version/resolution numbers, and filler words like
+    'naip'/'small'. Two entries describing the same coverage + data type collapse
+    to the same key (e.g. usa-tx_naip_small_2023_61cm and usa-tx_naip_small_2024_61cm
+    both -> 'usatx'; usa_faa_ifr_enr_high_2025-04-17_143m and ..._2026-06-11_143m
+    both -> 'usafaaifrenrhigh'), while distinct products keep distinct keys. Used
+    to deterministically clear obvious renames — exactly the case the old
+    exact-string diff false-flagged as missing.
+    """
+    name = os.path.basename((path or "").strip().lower())
+    name = re.sub(r"\.esp$", "", name)
+    name = re.sub(r"\d{4}-\d{2}-\d{2}", " ", name)    # ISO dates 2025-04-17
+    name = re.sub(r"\b\d{3,4}s?\b", " ", name)         # years like 2024 / 2003 / 1990s
+    name = re.sub(r"\b\d+(?:cm|m)\b", " ", name)       # resolutions 31cm / 1m / 90m
+    name = re.sub(r"\b(naip|small)\b", " ", name)      # filler words
+    name = re.sub(r"[^a-z]+", "", name)                # keep letters only -> identity
+    return name
+
+
+def _normalized_missing(intended, copied):
+    """Deterministic product-key matcher: an intended file is PRESENT if any
+    on-drive entry shares its normalized product key. Returns the intended entries
+    with NO same-product match on the drive. Leans PRESENT (only flags a file with
+    no same-product entry at all) — the opposite of the old exact-string diff,
+    which leaned MISSING and so flagged every renamed-but-present file."""
+    copied_keys = set(k for k in (_normalize_product_key(c) for c in copied) if k)
+    return [i for i in intended if _normalize_product_key(i) not in copied_keys]
+
+
+def _extract_intended_misses(text, candidates):
+    """Parse the judge's direct text reply into the list of still-missing files.
+
+    Pulls every 'data\\imagery\\....esp' path out of the reply (tolerant of
+    bullets / numbering / commentary / code fences) and keeps only those that
+    actually appear in `candidates` — so the model echoing LIST B names or
+    hallucinating a path can't leak in. Order follows `candidates`. A reply of
+    'NONE' / no paths yields []."""
+    found = set()
+    for m in re.finditer(r"data[\\/]imagery[\\/][^\s,\"']+\.esp", text or "", flags=re.IGNORECASE):
+        found.add(m.group(0).replace("/", "\\").lower())
+    return [c for c in candidates if c.lower() in found]
+
+
 def _judge_missing_imagery(drive_path):
     """
     Determine which INTENDED imagery files are genuinely still missing from the
@@ -1940,14 +2051,21 @@ def _judge_missing_imagery(drive_path):
 
     This is the verification gate (idea #3). It can't be a plain string diff:
     copied files routinely carry a NEWER name than the original packfile entry
-    (newer date/version/resolution wording), so only a model can decide
-    "same product, different name". We use the small, fast JUDGE_LLM_MODEL for it.
+    (newer date/version/resolution wording), so a literal name comparison flags
+    every renamed-but-present file as "missing".
 
-    Fast path: if every intended path is already present verbatim, nothing is
-    missing and no LLM is needed. Fallback: if the judge produces no usable output
-    but the counts disagree, fall back to a deterministic name diff so the
-    corrective stage still has a target list (the corrective LLM's no-substitute
-    rules keep an over-reported target harmless).
+    Two-stage design (robust to a flaky model):
+      1. DETERMINISTIC product-key pass (`_normalized_missing`) clears the obvious
+         renames — date/resolution/year drift — with zero LLM risk. This is the
+         exact case the old exact-string fallback got wrong.
+      2. For only the entries still unmatched, ask JUDGE_LLM_MODEL as a DIRECT chat
+         completion (NOT Open Interpreter) whether each is truly absent or just
+         present under a name normalization missed (added/removed "naip",
+         resolution-only change, etc.). The direct call returns the answer as text
+         we read straight off the response — the model can no longer "forget" to
+         write an output file (the failure that forced the bad fallback before).
+    If the model is unreachable, the deterministic candidates ARE the result
+    (they had no same-product match on the drive), which still leans correct.
     """
     status_mgr.update(status_number=12)
     dobdir_path = os.path.join(drive_path, "dobDir")
@@ -1959,75 +2077,72 @@ def _judge_missing_imagery(drive_path):
     copied = _read_imagery_lines(verify)
     logging.info(f"Imagery judge: {len(intended)} intended vs {len(copied)} on-drive imagery entries.")
 
-    # Fast, deterministic short-circuit: every intended path present verbatim.
-    copied_lower = set(c.lower() for c in copied)
-    if intended and all(i.lower() in copied_lower for i in intended):
-        logging.info("Imagery judge: all intended files present verbatim; nothing missing.")
-        _write_missing_list(missed_path, [])
-        return []
     if not intended:
         logging.info("Imagery judge: packfiles lists no imagery; nothing to verify.")
         _write_missing_list(missed_path, [])
         return []
 
-    # Remove any stale judge output so we can tell whether the judge wrote a fresh one.
-    try:
-        if os.path.exists(missed_path):
-            os.remove(missed_path)
-    except Exception:
-        pass
+    # Fast, deterministic short-circuit: every intended path present verbatim.
+    copied_lower = set(c.lower() for c in copied)
+    if all(i.lower() in copied_lower for i in intended):
+        logging.info("Imagery judge: all intended files present verbatim; nothing missing.")
+        _write_missing_list(missed_path, [])
+        return []
 
-    intended_block = "\n".join(intended)
+    # Stage 1: deterministic product-key matching clears renamed-but-present files
+    # (date/resolution/year drift) without any LLM call or risk.
+    candidates = _normalized_missing(intended, copied)
+    matched = len(intended) - len(candidates)
+    logging.info(f"Imagery judge: product-key matching cleared {matched} renamed file(s); "
+                 f"{len(candidates)} still need checking.")
+    if not candidates:
+        logging.info("Imagery judge: every intended file matched a product on the drive; nothing missing.")
+        _write_missing_list(missed_path, [])
+        return []
+
+    # Stage 2: a DIRECT (non-Open-Interpreter) LLM call judges only the remaining
+    # ambiguous candidates, catching same-product matches normalization missed.
+    candidate_block = "\n".join(candidates)
     copied_block = "\n".join(copied) if copied else "(none)"
     prompt = (
-        "You are a meticulous data-verification assistant helping confirm that a data drive received "
-        "all of its imagery files. Do NOT copy, move, rename, or modify any files — your ONLY job is to "
-        "compare two lists and write one short output file.\n\n"
-        "LIST A is the set of imagery files this drive was SUPPOSED to contain (from the original "
-        "packfile). LIST B is the set of imagery files ACTUALLY on the drive right now.\n\n"
+        "You are a meticulous data-verification assistant confirming a data drive received all of its "
+        "imagery files. Your ONLY job is to compare two lists and report which LIST A files are missing.\n\n"
+        "LIST A is a set of imagery files this drive was SUPPOSED to contain (from the original packfile) "
+        "that we could not yet confirm. LIST B is the set of imagery files ACTUALLY on the drive right now.\n\n"
         "A file in LIST A should be treated as PRESENT if LIST B contains the SAME imagery product, even "
         "when the filename is not identical. Filenames legitimately drift: a file on the drive may have a "
         "newer date, a newer version number, a different resolution token (e.g. 30cm vs 61cm), or an "
         "added/removed word such as \"naip\". Two entries are the SAME product when they clearly describe "
-        "the same geographic coverage and the same kind of imagery (for example the same country / state / "
-        "region and the same data type or chart), differing only in those date / version / resolution "
-        "details.\n\n"
+        "the same geographic coverage and the same kind of imagery (the same country / state / region and "
+        "the same data type or chart), differing only in those date / version / resolution details.\n\n"
         "A file in LIST A is MISSING only when LIST B contains NO entry that plausibly represents that "
         "same product. When unsure whether two entries are the same product, lean towards treating it as "
         "PRESENT (do not flag a file as missing on a guess).\n\n"
-        "LIST A — INTENDED:\n"
-        f"{intended_block}\n\n"
+        "LIST A — TO CHECK:\n"
+        f"{candidate_block}\n\n"
         "LIST B — ON THE DRIVE NOW:\n"
         f"{copied_block}\n\n"
         "Go through LIST A one entry at a time and decide whether a matching product exists in LIST B. "
-        f"Then write ONLY the MISSING LIST A entries to the file dobDir\\{MISSED_IMAGERY_FILE} (the dobDir "
-        "folder is inside your current working directory). Write each missing file on its own line, copied "
-        "EXACTLY as it appears in LIST A (the full \"data\\imagery\\...\" path). Write nothing else — no "
-        "headers, numbering, commentary, or blank padding. If every LIST A file has a match in LIST B, "
-        f"create dobDir\\{MISSED_IMAGERY_FILE} as an empty file."
+        "Then REPLY with ONLY the MISSING LIST A entries — each on its own line, copied EXACTLY as it "
+        "appears in LIST A (the full \"data\\imagery\\...\" path) — and NOTHING else: no headers, numbering, "
+        "commentary, explanation, or code. If every LIST A file has a match in LIST B, reply with the single "
+        "word NONE."
     )
-    logging.info(f"Running imagery judge (model={JUDGE_LLM_MODEL}, ctx={JUDGE_LLM_CONTEXT}).")
-    judge_llm = LLM(working_directory=drive_path, model=JUDGE_LLM_MODEL, context_window=JUDGE_LLM_CONTEXT,
+    logging.info(f"Running imagery judge as a direct call (model={JUDGE_LLM_MODEL}, ctx={JUDGE_LLM_CONTEXT}).")
+    judge_llm = LLM(model=JUDGE_LLM_MODEL, context_window=JUDGE_LLM_CONTEXT,
                     max_tokens=JUDGE_MAX_TOKENS, timeout=JUDGE_RUN_TIMEOUT_S)
-    judge_llm.use(prompt)
+    text = judge_llm.chat_text(prompt)
 
-    missing = []
-    judged = os.path.exists(missed_path)
-    if judged:
-        try:
-            with open(missed_path, "r", encoding="utf-8", errors="replace") as f:
-                missing = _imagery_lines_in_text(f.read())
-        except Exception as e:
-            logging.error(f"Failed to read judge output {missed_path}: {e}")
-            judged = False
+    if text is None:
+        # Model unreachable — the deterministic candidates (no same-product match
+        # on the drive) are our best answer. This is NOT the old exact diff: renamed
+        # files were already cleared in stage 1.
+        logging.warning("Imagery judge: direct LLM call failed; using deterministic product-key result.")
+        missing = candidates
+    else:
+        missing = _extract_intended_misses(text, candidates)
 
-    if not judged:
-        # Judge gave us nothing usable — fall back to a deterministic name diff so
-        # the corrective stage still has a target list to work from.
-        logging.warning("Imagery judge produced no usable output; falling back to a deterministic name diff.")
-        missing = [i for i in intended if i.lower() not in copied_lower]
-        _write_missing_list(missed_path, missing)
-
+    _write_missing_list(missed_path, missing)
     logging.info(f"Imagery judge: {len(missing)} imagery file(s) still missing.")
     return missing
 
