@@ -342,6 +342,53 @@ export const ASSERTIONS = [
   },
 
   {
+    name: 'Verify detail: correction run with <3 missing shows attempt count + filenames',
+    state: {
+      Running: 1, StatusNumber: 13, VerifyRun: 2, VerifyMaxRuns: 5,
+      VerifyMissingCount: 2,
+      VerifyMissing: ['usa_tx_houston.ecw', 'usa_ca_fresno.ecw'],
+    },
+    check(doc) {
+      const detail = $(doc, '.verify-detail');
+      if (!detail) return fail('expected .verify-detail block');
+      if (!/attempt\s+2\s+of\s+5/i.test(detail.textContent)) return fail('expected "attempt 2 of 5"');
+      const items = $$(doc, '.verify-missing-list li').map(li => li.textContent);
+      if (items.length !== 2) return fail(`expected 2 listed files, got ${items.length}`);
+      if (!items.includes('usa_tx_houston.ecw') || !items.includes('usa_ca_fresno.ecw')) {
+        return fail(`missing expected filenames, got ${JSON.stringify(items)}`);
+      }
+      return ok();
+    },
+  },
+
+  {
+    name: 'Verify detail: 3+ missing shows the count only, never the filenames',
+    state: {
+      Running: 1, StatusNumber: 13, VerifyRun: 4, VerifyMaxRuns: 5,
+      VerifyMissingCount: 12,
+      VerifyMissing: [],   // backend withholds names when 3+ remain
+    },
+    check(doc) {
+      const detail = $(doc, '.verify-detail');
+      if (!detail) return fail('expected .verify-detail block');
+      if (!/attempt\s+4\s+of\s+5/i.test(detail.textContent)) return fail('expected "attempt 4 of 5"');
+      if (!/12\s+imagery files/i.test(detail.textContent)) return fail('expected "12 imagery files" count');
+      if ($(doc, '.verify-missing-list')) return fail('filenames must NOT be listed when 3+ are missing');
+      return ok();
+    },
+  },
+
+  {
+    name: 'Verify detail: initial verify pass (no run, none flagged) adds no detail block',
+    state: { Running: 1, StatusNumber: 12, VerifyRun: 0, VerifyMissingCount: 0, VerifyMissing: [] },
+    check(doc) {
+      if (!/verifying imagery/i.test($(doc, '.card').textContent)) return fail('expected "verifying imagery" copy');
+      if ($(doc, '.verify-detail')) return fail('verify-detail should be absent during the initial pass');
+      return ok();
+    },
+  },
+
+  {
     name: 'Completed history: verified drive is green, unverified is yellow with note',
     state: { Running: 1, StatusNumber: 0, CompletedDrives: [
       { name: 'GreenDrive', issues: false, verified: true, timestamp: '2099-12-31T10:00:00' },

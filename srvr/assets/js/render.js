@@ -68,6 +68,44 @@ function progressBlock(label, completed, total) {
     </div>`;
 }
 
+// Extra detail for the imagery-verification stages (steps 12–14). Surfaces the
+// current correction attempt (out of the max) and what's still being searched
+// for — showing the actual filenames only when fewer than 3 remain (the backend
+// enforces the same rule, sending names only for a short list), otherwise just
+// the count so a long missing list never overwhelms the operator.
+function verifyDetail(state) {
+  const max = (typeof state.VerifyMaxRuns === 'number' && state.VerifyMaxRuns > 0)
+    ? state.VerifyMaxRuns : 5;
+  const run = (typeof state.VerifyRun === 'number' && state.VerifyRun > 0)
+    ? state.VerifyRun : 0;
+  const count = (typeof state.VerifyMissingCount === 'number' && state.VerifyMissingCount > 0)
+    ? state.VerifyMissingCount : 0;
+  const names = Array.isArray(state.VerifyMissing) ? state.VerifyMissing.filter(Boolean) : [];
+
+  // Nothing meaningful to add yet (e.g. the very first verification pass before
+  // any correction attempt) — fall back to just the stage's own copy.
+  if (!run && !count) return '';
+
+  let html = '<div class="verify-detail">';
+  if (run) {
+    html += `<div class="verify-attempt">Correction attempt ${run} of ${max}</div>`;
+  }
+  if (count) {
+    if (names.length) {
+      // Short list: name exactly what's left.
+      html += `<div class="verify-missing">Still searching for ${count} file${count === 1 ? '' : 's'}:
+        <ul class="verify-missing-list">
+          ${names.map(f => `<li>${esc(f)}</li>`).join('')}
+        </ul></div>`;
+    } else {
+      // 3+ outstanding: show the count only, not which ones.
+      html += `<div class="verify-missing">Still searching for ${count} imagery files.</div>`;
+    }
+  }
+  html += '</div>';
+  return html;
+}
+
 function spinnerHeadline(text) {
   return `
     <h1 class="headline">
@@ -183,7 +221,8 @@ function screenForState(state) {
       return {
         cardClass: '',
         inner: spinnerHeadline(STATUS_LABELS[12]) +
-          `<p class="subline">Regenerating the packfile and checking every imagery file made it onto the drive.</p>`
+          `<p class="subline">Regenerating the packfile and checking every imagery file made it onto the drive.</p>` +
+          verifyDetail(state)
       };
 
     case 13:
@@ -191,7 +230,8 @@ function screenForState(state) {
         cardClass: '',
         inner: spinnerHeadline(STATUS_LABELS[13]) +
           `<p class="subline">Some imagery files were missing — working out where to find them.<br/>
-            <em class="hint">The AI is thinking — this may take a while.</em></p>`
+            <em class="hint">The AI is thinking — this may take a while.</em></p>` +
+          verifyDetail(state)
       };
 
     case 14:
@@ -199,7 +239,8 @@ function screenForState(state) {
         cardClass: '',
         inner: spinnerHeadline(STATUS_LABELS[14]) +
           progressBlock('main', state.CompletedMainFiles, state.TotalMainFiles) +
-          `<p class="subline">Copying the imagery files that were missed the first time.</p>`
+          `<p class="subline">Copying the imagery files that were missed the first time.</p>` +
+          verifyDetail(state)
       };
 
     default:
@@ -304,6 +345,9 @@ export function render(state, prev) {
     prev.CompletedBaseFiles !== state.CompletedBaseFiles ||
     prev.TotalMainFiles !== state.TotalMainFiles ||
     prev.CompletedMainFiles !== state.CompletedMainFiles ||
+    prev.VerifyRun !== state.VerifyRun ||
+    prev.VerifyMissingCount !== state.VerifyMissingCount ||
+    JSON.stringify(prev.VerifyMissing) !== JSON.stringify(state.VerifyMissing) ||
     JSON.stringify(prev.CompletedDrives) !== JSON.stringify(state.CompletedDrives);
 
   if (!changed) return false;

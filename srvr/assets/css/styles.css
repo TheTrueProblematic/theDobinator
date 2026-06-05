@@ -685,6 +685,59 @@ select.form-input { cursor: pointer; }
   line-height: 1.4;
 }
 
+/* ---------- Imagery verification detail (steps 12–14) ---------- */
+/* Shown under the spinner headline while imagery is being verified/corrected.
+   Neutral, in-progress styling (not the warning palette) that reuses the design
+   tokens. The list wraps long filenames and scrolls instead of growing the card.
+   Works at both the mobile and desktop presets. */
+.verify-detail {
+  margin-top: 1.1rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.verify-attempt {
+  font-size: 0.7rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 0.3rem 0.75rem;
+  border: 1px solid var(--card-border);
+  border-radius: 999px;
+}
+
+.verify-missing {
+  font-size: 0.85rem;
+  color: var(--muted);
+  line-height: 1.5;
+  max-width: 32rem;
+}
+
+.verify-missing-list {
+  list-style: none;
+  margin: 0.45rem auto 0;
+  padding: 0.5rem 0.65rem;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+  border: 1px solid var(--card-border);
+  max-height: 7rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  text-align: left;
+}
+
+.verify-missing-list li {
+  font-size: 0.78rem;
+  color: var(--fg);
+  opacity: 0.9;
+  word-break: break-all;
+  line-height: 1.4;
+}
+
 /* Header actions cluster (e.g. Clear + Close on the Completed Drives modal) */
 .modal-header-actions {
   display: flex;

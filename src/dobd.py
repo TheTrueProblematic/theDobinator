@@ -242,6 +242,14 @@ class StatusManager:
             "PendingDrives": [],
             "UpdateAvailable": 0,
             "RebootRequired": 0,
+            # Imagery-verification detail for the WebUI (steps 12–14): which
+            # correction attempt (out of VerifyMaxRuns) is in progress, how many
+            # imagery files are still being searched for, and — only when fewer
+            # than 3 remain — their filenames. See set_verify_progress().
+            "VerifyRun": 0,
+            "VerifyMaxRuns": FIX_LOOP_MAX_RUNS,
+            "VerifyMissingCount": 0,
+            "VerifyMissing": [],
             "Running": 1
         }
         if os.path.exists(self.filepath):
@@ -270,6 +278,9 @@ class StatusManager:
                     data["CompletedBaseFiles"] = -1
                     data["TotalMainFiles"] = -1
                     data["CompletedMainFiles"] = -1
+                    data["VerifyRun"] = 0
+                    data["VerifyMissingCount"] = 0
+                    data["VerifyMissing"] = []
 
             if total_base is not None: data["TotalBaseFiles"] = total_base
             if comp_base is not None: data["CompletedBaseFiles"] = comp_base
@@ -297,6 +308,31 @@ class StatusManager:
             if data.get("RebootRequired", 0) != new_val:
                 data["RebootRequired"] = new_val
                 self._write_data(data)
+
+    def set_verify_progress(self, run=None, max_runs=None, missing=None):
+        """
+        Publish imagery-verification detail to status.json for the WebUI (steps
+        12–14). `run` is the current correction attempt number (1..max_runs; 0
+        means "not in a correction attempt yet"). `missing` is the list of
+        still-missing imagery entries (full "data\\imagery\\..." paths).
+
+        Privacy/clutter rule mirrored by the WebUI: we always publish the COUNT
+        of files still being searched for, but only publish their filenames when
+        FEWER THAN 3 remain — so the operator can see exactly what's left on a
+        near-finished drive without a long missing list overwhelming the screen.
+        """
+        with self._lock:
+            data = self._read_data()
+            if run is not None:
+                data["VerifyRun"] = run
+            if max_runs is not None:
+                data["VerifyMaxRuns"] = max_runs
+            if missing is not None:
+                names = [_imagery_basename(m) for m in missing if m]
+                data["VerifyMissingCount"] = len(names)
+                # Only surface the actual filenames for a short list (< 3).
+                data["VerifyMissing"] = names if len(names) < 3 else []
+            self._write_data(data)
 
     def set_drive_lists(self, blank_drives, pending_drives):
         """
@@ -1649,6 +1685,28 @@ def _clear_could_not_find(drive_path):
         logging.warning(f"Could not remove stale {p}: {e}")
 
 
+def _imagery_basename(entry):
+    """
+    Reduce a "data\\imagery\\...\\file.ext" packfile entry to just its filename
+    for display in the WebUI. Handles both slash styles regardless of host OS.
+    """
+    s = str(entry or "").replace("/", "\\").rstrip("\\")
+    return s.rsplit("\\", 1)[-1] if s else s
+
+
+def _read_missed_imagery(drive_path):
+    """Return the precise still-missing imagery list the judge wrote (one path/line)."""
+    p = os.path.join(drive_path, "dobDir", MISSED_IMAGERY_FILE)
+    if not os.path.exists(p):
+        return []
+    try:
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            return _imagery_lines_in_text(f.read())
+    except Exception as e:
+        logging.error(f"Failed to read {p}: {e}")
+        return []
+
+
 def _read_could_not_find(drive_path):
     """Return the imagery files the corrective LLM reported as genuinely absent from U."""
     p = os.path.join(drive_path, "dobDir", COULD_NOT_FIND_FILE)
@@ -1887,6 +1945,15 @@ def fix_loop(drive_path, run_number):
             logging.info(f"fix_loop run {run_number}: imagery now complete; drive verified.")
             return (True, [])
 
+    # Publish this attempt's number and the precise still-missing list to the
+    # WebUI before the corrective LLM starts (the judge has just written
+    # missedImagery.txt — for run 1 in compare_packfiles, for later runs above).
+    status_mgr.set_verify_progress(
+        run=run_number,
+        max_runs=FIX_LOOP_MAX_RUNS,
+        missing=_read_missed_imagery(drive_path),
+    )
+
     # Produce and copy a corrective mapping for this run (and let the LLM record any
     # genuinely-absent files in couldNotFind.txt).
     _clear_could_not_find(drive_path)
@@ -1936,6 +2003,9 @@ def verifySuccess(drive_path):
     otherwise), surfaced to the operator in the WebUI.
     """
     logging.info("--- Starting verifySuccess Process ---")
+    # Clear any stale verification detail from a previous drive so the WebUI's
+    # imagery panel starts this drive from a clean baseline.
+    status_mgr.set_verify_progress(run=0, max_runs=FIX_LOOP_MAX_RUNS, missing=[])
     dobdir_path = os.path.join(drive_path, "dobDir")
     issues_txt = os.path.join(dobdir_path, "ISSUES.txt")
 

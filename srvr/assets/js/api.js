@@ -16,6 +16,12 @@ const DEFAULT_STATE = Object.freeze({
   PendingDrives: [],
   UpdateAvailable: 0,
   RebootRequired: 0,
+  // Imagery-verification detail (steps 12–14) — must be listed here or
+  // normalizeState() would strip these keys before render.js ever sees them.
+  VerifyRun: 0,
+  VerifyMaxRuns: 5,
+  VerifyMissingCount: 0,
+  VerifyMissing: [],
 });
 
 export const ERROR_STATE = Object.freeze({
@@ -30,6 +36,10 @@ export const ERROR_STATE = Object.freeze({
   PendingDrives: [],
   UpdateAvailable: 0,
   RebootRequired: 0,
+  VerifyRun: 0,
+  VerifyMaxRuns: 5,
+  VerifyMissingCount: 0,
+  VerifyMissing: [],
   _error: true,
 });
 
