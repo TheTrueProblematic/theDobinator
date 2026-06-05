@@ -949,6 +949,35 @@ COUNTRY_IMAGERY_SRC = r"U:\ARS\Data\imagery\GLOBAL\COUNTRIES"
 COUNTRY_VECTOR_SRC  = r"U:\ARS\Data\vector\Baseline"
 COUNTRY_GEOCODE_SRC = r"U:\ARS\Data\geocode"
 
+# The ONLY legitimate source of build files is the read-only U: master at
+# U:\ARS\Data. Every robocopy in this file already sources from there, and the
+# matchFiles/fix-loop LLM prompts state it explicitly — but those agents run
+# under Open Interpreter with UNRESTRICTED filesystem access. When a second
+# build drive is plugged in alongside the one being processed, the agent can see
+# that other drive's ARS\data tree and map a file off of IT into mapping.csv,
+# which mainCopy then robocopies onto the wrong drive (cross-drive
+# contamination). `_is_trusted_source` is the deterministic backstop: any mapping
+# row whose source does not live under the U: master is refused, so another
+# drive's data can never be copied onto the drive being built. See AGENTS.md §3.
+MASTER_SOURCE_ROOT = r"U:\ARS\Data"
+
+
+def _is_trusted_source(source_path):
+    """True only if source_path lives under the read-only U: master (U:\\ARS\\Data).
+
+    Comparison is case-insensitive and slash-agnostic so the LLM's exact spelling
+    (e.g. U:\\ARS\\data vs U:/ARS/Data) does not matter. This is the guard that
+    keeps a file from any OTHER connected drive out of the mapping copy.
+    """
+    if not source_path:
+        return False
+    try:
+        norm = os.path.normpath(source_path).replace("/", "\\").casefold()
+    except Exception:
+        return False
+    root = os.path.normpath(MASTER_SOURCE_ROOT).replace("/", "\\").casefold()
+    return norm == root or norm.startswith(root + "\\")
+
 def copy_country_files(drive_path, iso):
     """
     Copies the three country-specific data sets for a non-US country drive,
@@ -1274,6 +1303,20 @@ def _copy_from_mapping(drive_path, mapping_csv, status_number=5, issues_filename
         dest_path = row[1].strip()
 
         logging.debug(f"Processing copy from {source_path} to {dest_path}")
+
+        # Cross-drive contamination guard: only ever copy from the U: master.
+        # An LLM-built mapping that points at another connected drive (because
+        # that drive was plugged in at the same time) is rejected here so its
+        # files cannot land on the drive being built.
+        if not _is_trusted_source(source_path):
+            error_msg = (
+                f"Refusing untrusted source outside the U: master ({MASTER_SOURCE_ROOT}): "
+                f"{source_path} (Destination was: {dest_path}). Skipped to prevent "
+                f"cross-drive contamination."
+            )
+            logging.error(error_msg)
+            errors_encountered.append(error_msg)
+            continue
 
         if not os.path.exists(source_path):
             error_msg = f"Source path does not exist: {source_path}"
