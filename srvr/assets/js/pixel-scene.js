@@ -368,7 +368,7 @@ buildSprites();
 const CONFIG = {
     sceneHeight: 180,          // Desktop scene height
     sceneHeightMobile: 140,    // Mobile scene height
-    groundYRatio: 0.72,        // Ground line at 72% of scene height
+    groundYRatio: 0.90,        // Ground line at 90% of scene height (moved lower)
     petSpeed: 0.025,           // pixels per ms
     idleMinMs: 2000,
     idleMaxMs: 6000,
@@ -432,14 +432,43 @@ class PetEntity {
         return min + Math.random() * (max - min);
     }
 
-    update(dt, groundY, sceneWidth) {
+    isSafeToStop(x, idlePets, staticObjects) {
+        const petW = this.sprites.idle.width;
+        // Check overlap with static ground objects
+        for (const obj of staticObjects) {
+            if (!(x + petW <= obj.x || obj.x + obj.width <= x)) {
+                return false;
+            }
+        }
+        // Check overlap with other idle pets
+        for (const other of idlePets) {
+            if (other === this) continue;
+            const otherW = other.sprites.idle.width;
+            if (!(x + petW <= other.x || other.x + otherW <= x)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    update(dt, groundY, sceneWidth, idlePets = [], staticObjects = []) {
         this.stateTimer += dt;
         this.bouncePhase += dt * 0.004;
         this.frameTimer += dt;
 
         if (this.stateTimer >= this.nextStateTime) {
-            this.stateTimer = 0;
-            this.transitionState();
+            if (this.state === 'walking') {
+                if (this.isSafeToStop(this.x, idlePets, staticObjects)) {
+                    this.stateTimer = 0;
+                    this.transitionState();
+                } else {
+                    // Extend stateTimer to stay in walking state and check again next frame
+                    this.stateTimer = this.nextStateTime;
+                }
+            } else {
+                this.stateTimer = 0;
+                this.transitionState();
+            }
         }
 
         if (this.state === 'walking') {
@@ -547,9 +576,12 @@ function buildScene() {
     const usable = sceneWidth - edge * 2;
 
     // --- Sun or Moon ---
-    const skyY = Math.floor(sceneHeight * getSkyBodyYRatio());
+    // Positioned higher in the sky so the bottom has a small gap before the max height of the tallest trees
     const skyBody = isNight ? SPRITES.moon : SPRITES.sun;
     if (skyBody) {
+        const treeHeight = SPRITES.tree ? SPRITES.tree.height : 20 * PIXEL_SIZE;
+        const gap = 2 * PIXEL_SIZE;
+        const skyY = groundY - treeHeight - skyBody.height - gap;
         entities.push(new StaticEntity(skyBody, Math.floor(sceneWidth * 0.78), skyY));
     }
 
@@ -564,40 +596,92 @@ function buildScene() {
         }
     }
 
-    // --- Trees + Bench share evenly spaced ground slots so they never overlap ---
+    // --- Static Objects Random Layout (Benches, Trees, Bushes) with Overlap Prevention ---
+    const staticObjectsToPlace = [];
+    if (SPRITES.bench) {
+        staticObjectsToPlace.push({ sprite: SPRITES.bench, type: 'bench' });
+    }
     const treeCount = Math.min(4, Math.max(1, Math.round(sceneWidth / 440)));
-    const hasBench = !!SPRITES.bench;
-    const bigCount = treeCount + (hasBench ? 1 : 0);
-    if (bigCount > 0) {
-        const slotW = usable / bigCount;
-        const benchSlot = hasBench ? Math.floor(bigCount / 2) : -1;
-        for (let s = 0; s < bigCount; s++) {
-            const center = edge + slotW * (s + 0.5);
-            const jitter = (Math.random() * 0.24 - 0.12) * slotW;
-            if (s === benchSlot) {
-                const bx = Math.round(center - SPRITES.bench.width / 2 + jitter);
-                entities.push(new StaticEntity(SPRITES.bench, bx, groundY - SPRITES.bench.height));
-            } else if (SPRITES.tree) {
-                const tx = Math.round(center - SPRITES.tree.width / 2 + jitter);
-                entities.push(new StaticEntity(SPRITES.tree, tx, groundY - SPRITES.tree.height));
+    if (SPRITES.tree) {
+        for (let i = 0; i < treeCount; i++) {
+            staticObjectsToPlace.push({ sprite: SPRITES.tree, type: 'tree' });
+        }
+    }
+    const bushCount = Math.min(5, Math.max(1, Math.round(sceneWidth / 360)));
+    if (SPRITES.bush) {
+        for (let i = 0; i < bushCount; i++) {
+            staticObjectsToPlace.push({ sprite: SPRITES.bush, type: 'bush' });
+        }
+    }
+
+    // Place largest objects first to make non-overlapping layout easier
+    staticObjectsToPlace.sort((a, b) => b.sprite.width - a.sprite.width);
+
+    const placedStaticObjects = [];
+    const minGap = 4 * PIXEL_SIZE; // Spacer between objects
+
+    for (const obj of staticObjectsToPlace) {
+        let placed = false;
+        let bestX = 0;
+
+        // Try placement with spacing gap
+        for (let attempt = 0; attempt < 100; attempt++) {
+            const maxX = sceneWidth - edge - obj.sprite.width;
+            const x = Math.round(edge + Math.random() * (maxX - edge));
+            let overlap = false;
+            for (const other of placedStaticObjects) {
+                if (!(x + obj.sprite.width + minGap <= other.x || other.x + other.width + minGap <= x)) {
+                    overlap = true;
+                    break;
+                }
+            }
+            if (!overlap) {
+                bestX = x;
+                placed = true;
+                break;
             }
         }
-    }
 
-    // --- Bushes (few, evenly spaced, interleaved between the big objects) ---
-    if (SPRITES.bush) {
-        const bushCount = Math.min(5, Math.max(1, Math.round(sceneWidth / 360)));
-        const span = usable / (bushCount + 1);
-        for (let i = 0; i < bushCount; i++) {
-            const center = edge + span * (i + 1);
-            const jitter = (Math.random() * 0.3 - 0.15) * span;
-            const gx = Math.round(center - SPRITES.bush.width / 2 + jitter);
-            entities.push(new StaticEntity(SPRITES.bush, gx, groundY - SPRITES.bush.height));
+        // Fallback 1: Try without gap if tight on space
+        if (!placed) {
+            for (let attempt = 0; attempt < 50; attempt++) {
+                const maxX = sceneWidth - edge - obj.sprite.width;
+                const x = Math.round(edge + Math.random() * (maxX - edge));
+                let overlap = false;
+                for (const other of placedStaticObjects) {
+                    if (!(x + obj.sprite.width <= other.x || other.x + other.width <= x)) {
+                        overlap = true;
+                        break;
+                    }
+                }
+                if (!overlap) {
+                    bestX = x;
+                    placed = true;
+                    break;
+                }
+            }
         }
+
+        // Fallback 2: Direct random placement if completely full
+        if (!placed) {
+            const maxX = sceneWidth - edge - obj.sprite.width;
+            bestX = Math.round(edge + Math.random() * (maxX - edge));
+        }
+
+        const y = groundY - obj.sprite.height;
+        placedStaticObjects.push({
+            x: bestX,
+            y: y,
+            width: obj.sprite.width,
+            height: obj.sprite.height,
+            type: obj.type
+        });
+        entities.push(new StaticEntity(obj.sprite, bestX, y));
     }
 
-    // --- Pets (spread out initially; they wander afterwards) ---
+    // --- Pets (spread out initially without overlapping static objects or other pets) ---
     const petCount = Math.min(5, Math.max(2, Math.round(sceneWidth / 480)));
+    const placedPets = [];
     for (let i = 0; i < petCount; i++) {
         const isCat = i % 2 === 0;
         const sprites = isCat
@@ -605,8 +689,41 @@ function buildScene() {
             : { idle: SPRITES.dogIdle, walk1: SPRITES.dogWalk1, walk2: SPRITES.dogWalk2 };
 
         if (sprites.idle) {
-            const base = edge + (usable / (petCount + 1)) * (i + 1);
-            const px = Math.round(base - sprites.idle.width / 2 + (Math.random() * 28 - 14));
+            let px = 0;
+            let found = false;
+            for (let attempt = 0; attempt < 100; attempt++) {
+                const base = edge + (usable / (petCount + 1)) * (i + 1);
+                px = Math.round(base - sprites.idle.width / 2 + (Math.random() * 40 - 20));
+
+                if (px < edge) px = edge;
+                if (px + sprites.idle.width > sceneWidth - edge) px = sceneWidth - edge - sprites.idle.width;
+
+                let overlap = false;
+                for (const obj of placedStaticObjects) {
+                    if (!(px + sprites.idle.width <= obj.x || obj.x + obj.width <= px)) {
+                        overlap = true;
+                        break;
+                    }
+                }
+                if (!overlap) {
+                    for (const other of placedPets) {
+                        const otherW = other.sprites.idle.width;
+                        if (!(px + sprites.idle.width <= other.x || other.x + otherW <= px)) {
+                            overlap = true;
+                            break;
+                        }
+                    }
+                }
+                if (!overlap) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                const maxX = sceneWidth - edge - sprites.idle.width;
+                px = Math.round(edge + Math.random() * (maxX - edge));
+            }
+
             const pet = new PetEntity(sprites, px, groundY - sprites.idle.height, isCat ? 'cat' : 'dog');
             if (i % 3 === 0) {
                 pet.state = 'walking';
@@ -614,6 +731,7 @@ function buildScene() {
                 pet.nextStateTime = pet.randomTime(CONFIG.wanderMinMs, CONFIG.wanderMaxMs);
             }
             entities.push(pet);
+            placedPets.push(pet);
         }
     }
 }
@@ -652,12 +770,18 @@ function gameLoop(timestamp) {
     sceneCtx.clearRect(0, 0, sceneWidth, sceneHeight);
     drawGround(sceneCtx);
 
+    const staticObjectsForCollision = entities
+        .filter(e => e instanceof StaticEntity && e.canvas !== SPRITES.sun && e.canvas !== SPRITES.moon)
+        .map(e => ({ x: e.x, width: e.canvas.width }));
+
+    const idlePets = entities.filter(e => e instanceof PetEntity && e.state === 'idle');
+
     for (const entity of entities) {
         if (entity instanceof CloudEntity) {
             entity.update(dt, sceneWidth);
         }
         if (entity instanceof PetEntity) {
-            entity.update(dt, groundY, sceneWidth);
+            entity.update(dt, groundY, sceneWidth, idlePets, staticObjectsForCollision);
         }
         entity.draw(sceneCtx);
     }

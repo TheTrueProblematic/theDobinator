@@ -56,6 +56,11 @@ function startFastPolling() {
 
 async function handlePowerClick() {
   if (powerInFlight) return;
+  if (isProcessing()) {
+    if (!confirm('The Dobinator is currently processing a drive. Are you sure you want to turn it off?')) {
+      return;
+    }
+  }
   const btn = document.getElementById('powerBtn');
   if (btn) btn.classList.add('is-busy');
   powerInFlight = true;
