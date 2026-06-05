@@ -38,6 +38,12 @@ POLLING_PREV_LOG_FILE = os.path.join(LOGS_DIR, "pollingLogPrev.log")
 # is captured by dobd.py and funneled here, keeping it out of dobLog.log).
 LLM_LOG_FILE = os.path.join(LOGS_DIR, "llmRunner.log")
 LLM_PREV_LOG_FILE = os.path.join(LOGS_DIR, "llmRunnerPrev.log")
+# Dedicated log recording, for every finished LLM run, what percentage of the
+# model's context window the conversation consumed (plus the model and window
+# size). llm_runner.py emits a CONTEXT_SENTINEL line that the LLM class parses
+# and writes here. Kept separate so the usage trend is easy to scan.
+CONTEXT_LOG_FILE = os.path.join(LOGS_DIR, "contextLog.log")
+CONTEXT_PREV_LOG_FILE = os.path.join(LOGS_DIR, "contextLogPrev.log")
 RUN_SEPARATOR = "\n" + "="*50 + " END OF RUN " + "="*50 + "\n"
 
 # --- Completed-drive history (persisted forever) ---
@@ -139,6 +145,7 @@ def rotate_prev_log(log_file, prev_log_file):
 rotate_prev_log(LOG_FILE, PREV_LOG_FILE)
 rotate_prev_log(POLLING_LOG_FILE, POLLING_PREV_LOG_FILE)
 rotate_prev_log(LLM_LOG_FILE, LLM_PREV_LOG_FILE)
+rotate_prev_log(CONTEXT_LOG_FILE, CONTEXT_PREV_LOG_FILE)
 
 class LessNoiseFilter(logging.Filter):
     def filter(self, record):
@@ -216,6 +223,20 @@ llmlog.setLevel(logging.DEBUG)
 llmlog.propagate = False
 llmlog.addHandler(llm_file_handler)
 llmlog.addHandler(stream_handler)
+
+# --- Dedicated context-usage logger ---
+# One line per finished LLM run: percent of the context window consumed, the
+# model, and the window size. Fed by the CONTEXT_SENTINEL line that
+# llm_runner.py prints and the LLM class parses. Kept out of the other logs.
+context_file_handler = logging.FileHandler(CONTEXT_LOG_FILE, mode='w', encoding='utf-8')
+context_file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+context_file_handler.addFilter(noise_filter)
+
+clog = logging.getLogger("dobinator.context")
+clog.setLevel(logging.DEBUG)
+clog.propagate = False
+clog.addHandler(context_file_handler)
+clog.addHandler(stream_handler)
 
 STATUS_FILE = os.path.join(PROJECT_ROOT, "srvr", "status.json")
 
@@ -636,7 +657,38 @@ def _kill_process_tree(proc):
 # never freeze a drive build forever (the historical "Matching Specific Files"
 # bug). It is a safety net — the subprocess isolation is what actually prevents
 # the hang.
-LLM_RUN_TIMEOUT_S = 2700  # 45 minutes
+LLM_RUN_TIMEOUT_S = 2700  # 45 min — generous ceiling for matchFiles' filesystem exploration
+
+# Tighter ceilings for the short verification stages. The imagery judge only
+# reasons over two small text lists, and a corrective run only has to locate a
+# handful of files, so they finish in minutes; a long stall there is a hung or
+# erroring server, not real work, and shouldn't sit for the full 45 minutes
+# before the retry kicks in.
+JUDGE_RUN_TIMEOUT_S = 900   # 15 min
+FIX_RUN_TIMEOUT_S = 1500    # 25 min
+
+# How many times to relaunch a failed LLM run (timeout or non-zero exit) in a
+# fresh subprocess before giving up. A local server can transiently error while
+# it loads/swaps a model; one clean retry recovers it instead of wasting a stage.
+LLM_RUN_ATTEMPTS = 2
+
+# Output-token caps. Open Interpreter writes the model's reply — including the
+# Python it executes to create mapping.csv / extraMapping CSVs — within this many
+# tokens. 4096 was too small: the corrective LLM's file-writing code was
+# truncated mid-line ("SyntaxError: incomplete input") so no CSV was produced and
+# nothing got recovered. The local 2x3090 server affords far more headroom; each
+# cap is kept comfortably below its stage's context window. Watch the real fill
+# with logs/contextLog.log.
+DEFAULT_MAX_TOKENS = 8192      # general steps (classifyRegion, summarizeIssues, …)
+MATCH_MAX_TOKENS = 16384       # matchFiles: emits the whole mapping.csv via code
+JUDGE_MAX_TOKENS = 2048        # imagery judge: only writes a short missing-list (ctx 10k)
+FIX_MAX_TOKENS = 12288         # corrective runs 1–4 (ctx 40k)
+FINAL_FIX_MAX_TOKENS = 4096    # final corrective run (gemma, ctx 10k)
+
+# Sentinel line llm_runner.py prints to report context-window usage for a
+# finished run; the LLM class parses it out of the child's stdout and writes the
+# result to contextLog.log. Kept in sync with CONTEXT_SENTINEL in llm_runner.py.
+CONTEXT_SENTINEL = "__DOB_CONTEXT_USAGE__"
 
 
 class LLM:
@@ -657,7 +709,8 @@ class LLM:
     """
     def __init__(self, ip_address="192.168.11.65", port=1234, working_directory=None,
                  model="openai/qwen/qwen3.6-27b", context_window=40000, api_key="fake_key",
-                 max_tokens=4096, timeout=LLM_RUN_TIMEOUT_S):
+                 max_tokens=DEFAULT_MAX_TOKENS, timeout=LLM_RUN_TIMEOUT_S,
+                 max_attempts=LLM_RUN_ATTEMPTS):
         self.ip_address = ip_address
         self.port = port
         self.working_directory = working_directory
@@ -666,9 +719,11 @@ class LLM:
         self.api_key = api_key
         self.max_tokens = max_tokens
         self.timeout = timeout
+        self.max_attempts = max_attempts
         logging.debug(
             f"LLM configured for model {self.model} at "
-            f"http://{self.ip_address}:{self.port}/v1 (subprocess mode, timeout={self.timeout}s)"
+            f"http://{self.ip_address}:{self.port}/v1 (subprocess mode, timeout={self.timeout}s, "
+            f"max_tokens={self.max_tokens}, max_attempts={self.max_attempts})"
         )
 
     def use(self, prompt):
@@ -678,12 +733,85 @@ class LLM:
             return self.useLoc(prompt, os.getcwd())
         return self.useLoc(prompt, self.working_directory)
 
+    def _log_context_usage(self, usage, directory):
+        """Write one contextLog.log line for a finished run from the parsed
+        CONTEXT_SENTINEL payload (percent / model / window / tokens). Falls back
+        to a clear UNKNOWN line if the child never reported usage (e.g. it
+        crashed before the sentinel)."""
+        try:
+            if usage and "percent" in usage:
+                clog.info(
+                    f"context={float(usage.get('percent', 0)):.1f}% used | "
+                    f"model={usage.get('model', self.model)} | "
+                    f"window={usage.get('context_window', self.context_window)} tokens | "
+                    f"used={usage.get('tokens', '?')} tokens | dir={directory}"
+                )
+            else:
+                clog.warning(
+                    f"context=UNKNOWN (no usage reported) | model={self.model} | "
+                    f"window={self.context_window} tokens | dir={directory}"
+                )
+        except Exception as e:
+            logging.debug(f"Failed to log context usage: {e}")
+
+    def _preflight(self, attempts=10, delay=4, req_timeout=30):
+        """Make sure the target model is loaded and the server is responsive
+        before handing it a long Open Interpreter run.
+
+        The LLM runs on a local OpenAI-compatible server (LM Studio on the 2x3090
+        box). It can only hold so many models in VRAM, and the bot rotates through
+        several models per drive (matchFiles vs the imagery judge vs the two fix
+        models), so the FIRST request after a model switch can stall or error
+        while the weights load — and Open Interpreter, hitting that mid-chat,
+        used to hang until the 45-minute watchdog killed it. We absorb the load
+        window here with a cheap 1-token completion, retried with backoff, so the
+        real run only starts once the model actually answers. Returns True when it
+        becomes ready; False means we proceed anyway and let the run + timeout
+        handle a genuinely dead server.
+        """
+        url = f"http://{self.ip_address}:{self.port}/v1/chat/completions"
+        body = json.dumps({
+            "model": self.model.split("openai/", 1)[-1],
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+            "temperature": 0,
+        }).encode("utf-8")
+        for i in range(1, attempts + 1):
+            try:
+                req = urllib.request.Request(
+                    url, data=body, method="POST",
+                    headers={"Content-Type": "application/json",
+                             "Authorization": f"Bearer {self.api_key}"},
+                )
+                with urllib.request.urlopen(req, timeout=req_timeout) as resp:
+                    if 200 <= getattr(resp, "status", 200) < 300:
+                        if i > 1:
+                            llmlog.info(f"Preflight: model '{self.model}' ready after {i} attempt(s).")
+                        return True
+            except Exception as e:
+                llmlog.warning(
+                    f"Preflight {i}/{attempts} for model '{self.model}' failed ({e}); "
+                    f"server may be loading it — retrying in {delay}s."
+                )
+                time.sleep(delay)
+        llmlog.error(
+            f"Preflight: model '{self.model}' never became ready after {attempts} attempts; "
+            "launching the run anyway."
+        )
+        return False
+
     def useLoc(self, prompt, directory):
         """
         Run the prompt in `directory` by launching llm_runner.py as a subprocess.
         Returns the runner's exit code (0 = success), or None on failure/timeout.
-        Side effects the callers rely on (files written by the LLM) land on the
-        real filesystem exactly as before.
+
+        A failed run (timeout or non-zero exit) is retried in a FRESH subprocess
+        up to self.max_attempts times — a local model server can transiently error
+        while it loads/swaps a model, and one clean relaunch recovers it instead
+        of throwing away the whole stage. Each attempt is preceded by a cheap model
+        preflight so the run only starts once the model is loaded. Side effects the
+        callers rely on (files written by the LLM) land on the real filesystem
+        exactly as before.
         """
         if not (directory and os.path.exists(directory)):
             logging.error(f"Directory {directory} does not exist. Cannot execute prompt.")
@@ -710,12 +838,53 @@ class LLM:
             with os.fdopen(cfg_fd, "w", encoding="utf-8") as f:
                 json.dump(cfg, f)
 
-            logging.info(f"LLM executing prompt in {directory} via subprocess (timeout={self.timeout}s).")
-            llmlog.info("=" * 70)
-            llmlog.info(f"LLM RUN START — model={self.model}  dir={directory}")
-            llmlog.info(f"PROMPT: {prompt}")
+            attempts = max(1, int(self.max_attempts))
+            rc = None
+            for attempt in range(1, attempts + 1):
+                llmlog.info("=" * 70)
+                llmlog.info(
+                    f"LLM RUN START — model={self.model}  dir={directory}  "
+                    f"attempt={attempt}/{attempts}  (timeout={self.timeout}s, max_tokens={self.max_tokens})"
+                )
+                if attempt == 1:
+                    llmlog.info(f"PROMPT: {prompt}")
+                logging.info(
+                    f"LLM executing prompt in {directory} via subprocess "
+                    f"(attempt {attempt}/{attempts}, timeout={self.timeout}s)."
+                )
 
-            creationflags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
+                # Make sure the model is loaded/responsive before the real run.
+                self._preflight()
+
+                rc = self._run_once(runner, cfg_path, directory)
+                if rc == 0:
+                    return 0
+                logging.error(f"LLM run attempt {attempt}/{attempts} failed (rc={rc}).")
+                if attempt < attempts:
+                    llmlog.warning(f"Retrying LLM run (attempt {attempt + 1}/{attempts}) after a short backoff.")
+                    time.sleep(5)
+            return rc
+        except Exception as e:
+            logging.error(f"LLM subprocess execution failed: {e}", exc_info=True)
+            return None
+        finally:
+            try:
+                os.remove(cfg_path)
+            except Exception:
+                pass
+
+    def _run_once(self, runner, cfg_path, directory):
+        """Launch one llm_runner.py subprocess and wait (bounded by self.timeout).
+        Returns the exit code, or None on timeout/launch failure. Records the
+        run's context-window usage to contextLog.log."""
+        creationflags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
+        # Force UTF-8 in the child too (belt-and-suspenders alongside llm_runner's
+        # own stdout reconfigure) so Open Interpreter can never crash a run by
+        # printing a non-cp1252 character like "→".
+        child_env = dict(os.environ)
+        child_env["PYTHONUTF8"] = "1"
+        child_env["PYTHONIOENCODING"] = "utf-8"
+        try:
             proc = subprocess.Popen(
                 [sys.executable, runner, cfg_path],
                 cwd=directory,
@@ -727,53 +896,70 @@ class LLM:
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
+                env=child_env,
             )
-
-            # Pump the child's output into the dedicated LLM log on a helper
-            # thread so we keep full visibility without blocking the timeout.
-            def _pump():
-                try:
-                    for line in proc.stdout:
-                        llmlog.debug(line.rstrip("\n"))
-                except Exception:
-                    pass
-
-            pump = threading.Thread(target=_pump, daemon=True)
-            pump.start()
-
-            try:
-                proc.wait(timeout=self.timeout)
-            except subprocess.TimeoutExpired:
-                logging.error(
-                    f"LLM subprocess exceeded the {self.timeout}s timeout — killing it. "
-                    "This is the guard against the historical 'Matching Specific Files' hang."
-                )
-                llmlog.error(f"LLM RUN TIMED OUT after {self.timeout}s — killing subprocess tree.")
-                _kill_process_tree(proc)
-                try:
-                    proc.wait(timeout=30)
-                except Exception:
-                    pass
-                return None
-            finally:
-                pump.join(timeout=5)
-
-            rc = proc.returncode
-            if rc == 0:
-                logging.info("LLM subprocess completed successfully.")
-                llmlog.info("LLM RUN FINISHED OK.")
-            else:
-                logging.error(f"LLM subprocess exited with non-zero code {rc}.")
-                llmlog.error(f"LLM RUN FINISHED WITH EXIT CODE {rc}.")
-            return rc
         except Exception as e:
-            logging.error(f"LLM subprocess execution failed: {e}", exc_info=True)
+            logging.error(f"Failed to launch LLM subprocess: {e}", exc_info=True)
             return None
-        finally:
+
+        # Pump the child's output into the dedicated LLM log on a helper thread so
+        # we keep full visibility without blocking the timeout. The child emits a
+        # single CONTEXT_SENTINEL line reporting how full the context window got;
+        # capture it here instead of logging it raw.
+        context_usage = {}
+
+        def _pump():
             try:
-                os.remove(cfg_path)
+                for line in proc.stdout:
+                    s = line.rstrip("\n")
+                    idx = s.find(CONTEXT_SENTINEL)
+                    if idx != -1:
+                        try:
+                            context_usage.update(
+                                json.loads(s[idx + len(CONTEXT_SENTINEL):].strip())
+                            )
+                        except Exception:
+                            pass
+                        continue
+                    llmlog.debug(s)
             except Exception:
                 pass
+
+        pump = threading.Thread(target=_pump, daemon=True)
+        pump.start()
+
+        try:
+            proc.wait(timeout=self.timeout)
+        except subprocess.TimeoutExpired:
+            logging.error(
+                f"LLM subprocess exceeded the {self.timeout}s timeout — killing it. "
+                "This is the guard against the historical 'Matching Specific Files' hang."
+            )
+            llmlog.error(f"LLM RUN TIMED OUT after {self.timeout}s — killing subprocess tree.")
+            _kill_process_tree(proc)
+            try:
+                proc.wait(timeout=30)
+            except Exception:
+                pass
+            clog.warning(
+                f"context=UNKNOWN (run timed out after {self.timeout}s) | "
+                f"model={self.model} | window={self.context_window} tokens | dir={directory}"
+            )
+            return None
+        finally:
+            pump.join(timeout=5)
+
+        # Record context-window usage for this run (-> contextLog.log).
+        self._log_context_usage(context_usage, directory)
+
+        rc = proc.returncode
+        if rc == 0:
+            logging.info("LLM subprocess completed successfully.")
+            llmlog.info("LLM RUN FINISHED OK.")
+        else:
+            logging.error(f"LLM subprocess exited with non-zero code {rc}.")
+            llmlog.error(f"LLM RUN FINISHED WITH EXIT CODE {rc}.")
+        return rc
 
 
 
@@ -1154,11 +1340,35 @@ def copy_airport(drive_path, source_zip=AIRPORT_ZIP_SOURCE):
 # The instructions handed to the matchFiles LLM. Pulled out to a module-level
 # constant so the imagery-verification fix_loop can quote it verbatim as the
 # "previous agent's prompt" when asking a corrective LLM to recover misses.
-MATCH_FILES_PROMPT = (
+def _drive_letter(drive_path):
+    """Return the target drive as a bare 'X:' (e.g. 'F:') for use in prompts and
+    destination paths. Falls back to the first two chars if splitdrive comes up
+    empty (it shouldn't for a real 'F:\\' root)."""
+    d = os.path.splitdrive(drive_path or "")[0]
+    if not d:
+        d = (drive_path or "")[:2]
+    return d.rstrip("\\/") or "D:"
+
+
+def build_match_files_prompt(drive_path):
+    """Build the matchFiles prompt for a SPECIFIC drive.
+
+    The destination drive letter is injected from `drive_path` rather than
+    hardcoded. Previously the examples literally said "D:..." which weaker models
+    copied verbatim, writing mapping rows that targeted D: even when the drive
+    being built was F: (etc.) — so the copies went nowhere. The strategy/wording
+    is otherwise unchanged (see AGENTS.md §3: only the drive letter is templated).
+    """
+    drive = _drive_letter(drive_path)  # e.g. "F:"
+    return (
         "You are currently on the root of a drive that has some data on it, but needs even more. "
         "Currently, it has a file called packfiles.txt, a dobDir folder, and an ARS folder. "
         "In that ARS folder is another subfolder called data. In that data folder are a variety "
         "of folders with different types of data in them.\n\n"
+        f"IMPORTANT: This drive — the one you are building — is the \"{drive}\" drive. Every "
+        f"DESTINATION path you write must be on \"{drive}\" (for example "
+        f"\"{drive}\\ARS\\data\\imagery\\...\"). Do NOT write destinations to any other drive "
+        "letter. The SOURCE paths you copy from are always on the U drive (\"U:\\ARS\\Data\\...\").\n\n"
         "In packfiles.txt all of the data files are listed out with their paths relative to the data "
         "folder (in the ARS folder). Some are already on this drive (for example "
         "\"data\\imagery\\BlueMarble.esp\" is already on this drive under \"ARS\\data...\". "
@@ -1174,11 +1384,11 @@ MATCH_FILES_PROMPT = (
         "For example, if this is listed in packfiles.txt: "
         "data\\vector\\n_can-on-ottawa_police_neighborhoods_polygons_t_polygon_c_20250728.esp\n"
         "You would need a row in the csv like this:\n"
-        "U:\\ARS\\Data\\vector\\LIMITED_DISTRIBUTION\\can-on_OttawaPolice\\n_can-on-ottawa_police_neighborhoods_polygons_t_polygon_c_20250728.esp, D:ARS\\data\\vector\\n_can-on-ottawa_police_neighborhoods_polygons_t_polygon_c_20250728.esp\n\n"
+        f"U:\\ARS\\Data\\vector\\LIMITED_DISTRIBUTION\\can-on_OttawaPolice\\n_can-on-ottawa_police_neighborhoods_polygons_t_polygon_c_20250728.esp, {drive}\\ARS\\data\\vector\\n_can-on-ottawa_police_neighborhoods_polygons_t_polygon_c_20250728.esp\n\n"
         "Additionally, for another example, if you saw this listed in packfiles.txt: "
         "data\\geocode\\can\\can2025_06_mn_pd_ph_2025-08-29.voc\n"
         "You may need a row in the csv that looks like this:\n"
-        "U:\\ARS\\Data\\geocode\\can\\can2025_12_mn_pd_ph_2026-02-17.voc, D:ARS\\data\\geocode\\can\\can2025_12_mn_pd_ph_2026-02-17.voc\n"
+        f"U:\\ARS\\Data\\geocode\\can\\can2025_12_mn_pd_ph_2026-02-17.voc, {drive}\\ARS\\data\\geocode\\can\\can2025_12_mn_pd_ph_2026-02-17.voc\n"
         "Note that even though the date in the packfiles list is older, we found the newer date and listed "
         "it exactly as is to be transferred since we will want this newer data set (keep the new name).\n\n"
         "Finally, something to note is that for geocode, you are generally looking for a whole folder of "
@@ -1193,7 +1403,7 @@ MATCH_FILES_PROMPT = (
         "Final Note: All of the files that you are looking for are in one of three subfolders of \"U:\\ARS\\Data\\...\". Namely the imagery, geocode, and vector folders. There is no need to look in any other folders such as imagery_old, imagery_stage, vector_old, etc. Don't look in these folders.\n\n"
         "SAFETY WARNING: The U drive you should treat as READ ONLY. Do not make any files here, even temporary files. You are just reading information from it.\n\n"
         "CRITICAL: MAKE ABSOLUTE SURE THAT YOU FIND ALL FILES IN PACKFILES IN IMAGERY, VECTORS, AND GEOCODE!"
-)
+    )
 
 
 def matchFiles(drive_path):
@@ -1204,10 +1414,12 @@ def matchFiles(drive_path):
     status_mgr.update(status_number=4)
     logging.info("--- Starting matchFiles Process ---")
 
-    # Create a new LLM object with its working directory on the root of the drive
-    match_llm = LLM(working_directory=drive_path)
+    # Create a new LLM object with its working directory on the root of the drive.
+    # MATCH_MAX_TOKENS gives it room to emit the whole mapping.csv via code without
+    # being truncated mid-write.
+    match_llm = LLM(working_directory=drive_path, max_tokens=MATCH_MAX_TOKENS)
 
-    prompt = MATCH_FILES_PROMPT
+    prompt = build_match_files_prompt(drive_path)
     logging.info(f"Sending prompt to LLM in matchFiles: '{prompt}'")
     match_llm.use(prompt)
 
@@ -1229,7 +1441,7 @@ def matchFiles(drive_path):
         model="openai/qwen/qwen3.6-27b",
         context_window=100000,
         api_key="fake_key",
-        max_tokens=4096
+        max_tokens=MATCH_MAX_TOKENS
     )
 
     verify_prompt = (
@@ -1795,7 +2007,8 @@ def _judge_missing_imagery(drive_path):
         f"create dobDir\\{MISSED_IMAGERY_FILE} as an empty file."
     )
     logging.info(f"Running imagery judge (model={JUDGE_LLM_MODEL}, ctx={JUDGE_LLM_CONTEXT}).")
-    judge_llm = LLM(working_directory=drive_path, model=JUDGE_LLM_MODEL, context_window=JUDGE_LLM_CONTEXT)
+    judge_llm = LLM(working_directory=drive_path, model=JUDGE_LLM_MODEL, context_window=JUDGE_LLM_CONTEXT,
+                    max_tokens=JUDGE_MAX_TOKENS, timeout=JUDGE_RUN_TIMEOUT_S)
     judge_llm.use(prompt)
 
     missing = []
@@ -1858,15 +2071,17 @@ def _run_fix_llm(drive_path, run_number):
     """
     status_mgr.update(status_number=13)
     if run_number >= FIX_LOOP_MAX_RUNS:
-        model, context_window = FINAL_FIX_LLM_MODEL, FINAL_FIX_LLM_CONTEXT
+        model, context_window, fix_max_tokens = FINAL_FIX_LLM_MODEL, FINAL_FIX_LLM_CONTEXT, FINAL_FIX_MAX_TOKENS
     else:
-        model, context_window = FIX_LLM_MODEL, FIX_LLM_CONTEXT
+        model, context_window, fix_max_tokens = FIX_LLM_MODEL, FIX_LLM_CONTEXT, FIX_MAX_TOKENS
     logging.info(f"--- fix_loop run {run_number}: launching corrective LLM (model={model}, ctx={context_window}) ---")
-    fix_llm = LLM(working_directory=drive_path, model=model, context_window=context_window)
+    fix_llm = LLM(working_directory=drive_path, model=model, context_window=context_window,
+                  max_tokens=fix_max_tokens, timeout=FIX_RUN_TIMEOUT_S)
+    drive = _drive_letter(drive_path)
     prompt = (
         "An AI agent, much like you, was just run on this drive with this as its prompt and goal:\n\n"
         "-------------------- PREVIOUS AGENT'S PROMPT --------------------\n"
-        f"{MATCH_FILES_PROMPT}\n"
+        f"{build_match_files_prompt(drive_path)}\n"
         "---\n\n"
         "It thought that it got all of the files but I found some discrepancies. You are being run on "
         "the root of the drive we are working on, and there is a subfolder called dobDir with a file in "
@@ -1877,10 +2092,22 @@ def _run_fix_llm(drive_path, run_number):
         "files that are present under a newer name — so do not second-guess it; just find the listed "
         "files.) For each one, find its genuine source on the U drive and add it to a new mapping csv in "
         f"dobDir called extraMapping{run_number}.csv.\n\n"
+        "HOW TO WORK — THIS MATTERS:\n"
+        f"* The list is SHORT (usually just a handful of files), so the output CSV is tiny — at most one "
+        "row per missing file. Do NOT write a big, clever, general-purpose search program; that is how "
+        "previous attempts FAILED — the long script got cut off partway and never wrote the file.\n"
+        "* Work in SMALL, SIMPLE steps. Use short commands to look around the U drive — e.g. list "
+        f"\"U:\\ARS\\Data\\imagery\\usa\" and read the names, or `dir`/`os.listdir` one folder at a time — "
+        "to locate each missing file by eye. Keep every individual code block short so it always finishes.\n"
+        f"* Once you have identified the genuine U-drive source for each file you could find, write the CSV "
+        f"in ONE final small step: just open dobDir\\extraMapping{run_number}.csv and write the rows "
+        "directly (you already know the exact source and destination strings — you do not need a program "
+        "to discover them again). If you found nothing, that is fine — still finish cleanly.\n\n"
         "CRITICAL RULES — read these carefully, they matter enormously:\n"
         f"1. OUTPUT FORMAT: The ONLY mapping file you create is dobDir\\extraMapping{run_number}.csv. It "
         "must be a real CSV with exactly two columns per row — the source path on the U drive, then the "
-        "destination path on this drive — and NO header row. Do NOT write any notes, logs, or other "
+        f"destination path on this drive (which is the \"{drive}\" drive, e.g. \"{drive}\\ARS\\data\\imagery\\...\") "
+        "— and NO header row. Do NOT write any notes, logs, or other "
         "intermediate/scratch output. If you absolutely must create a temporary file, it MUST live inside "
         "the dobDir folder — NEVER create any file at the root of the drive.\n"
         "2. NEVER RENAME A FILE: The destination filename must be EXACTLY, character-for-character, the "

@@ -41,6 +41,78 @@ import json
 import os
 import sys
 
+# Sentinel line llm_runner prints (and dobd.py's LLM class parses) to record how
+# much of the model's context window a finished run consumed. Kept in sync with
+# CONTEXT_SENTINEL in dobd.py.
+CONTEXT_SENTINEL = "__DOB_CONTEXT_USAGE__"
+
+
+def _force_utf8_stdio():
+    """Force stdout/stderr to UTF-8 so Open Interpreter's streaming prints can
+    NEVER crash the run on a non-Latin-1 character.
+
+    On Windows a child process's piped stdout defaults to the legacy ANSI code
+    page (cp1252). Open Interpreter streams the model's reply straight to stdout,
+    so the moment a model emitted a perfectly ordinary character like "→" (U+2192)
+    or "•" (U+2022) — which happens constantly when an agent narrates
+    "source → destination" mappings — print() raised UnicodeEncodeError and the
+    whole chat aborted (exit 5), silently throwing away the matchFiles / judge /
+    fix work mid-run. Reconfiguring to UTF-8 with errors="replace" makes that
+    impossible.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
+def _report_context_usage(interpreter, cfg):
+    """Print a CONTEXT_SENTINEL line describing how full the context window got.
+
+    Estimates the tokens in the full conversation (system + user + assistant +
+    tool output) at the end of the run — a good proxy for the peak request size
+    against the model's context window — and reports it as a percentage. The
+    parent (dobd.py) parses the sentinel and writes it to logs/contextLog.log.
+    Never raises: any failure falls back to a rough char/4 estimate, then to 0.
+    """
+    model = cfg.get("model", "") or ""
+    try:
+        window = int(cfg.get("context_window", 0) or 0)
+    except Exception:
+        window = 0
+
+    messages = []
+    try:
+        for m in (getattr(interpreter, "messages", None) or []):
+            content = m.get("content", "")
+            if not isinstance(content, str):
+                content = str(content)
+            messages.append({"role": m.get("role", "user") or "user", "content": content})
+    except Exception:
+        messages = []
+
+    tokens = None
+    try:
+        import litellm
+        # Strip the litellm provider prefix ("openai/") so the tokenizer lookup
+        # sees the real model id; unknown models fall back to a default encoder.
+        token_model = model.split("openai/", 1)[-1]
+        tokens = litellm.token_counter(model=token_model, messages=messages)
+    except Exception:
+        tokens = None
+    if not tokens:
+        tokens = sum(len(m["content"]) for m in messages) // 4  # ~4 chars/token
+
+    percent = (tokens / window * 100.0) if window > 0 else 0.0
+    payload = {
+        "model": model,
+        "context_window": window,
+        "tokens": int(tokens),
+        "percent": round(percent, 2),
+    }
+    print(CONTEXT_SENTINEL + json.dumps(payload), flush=True)
+
 
 def _load_open_interpreter():
     """Import OpenInterpreter, falling back to the common pipx install path."""
@@ -56,6 +128,10 @@ def _load_open_interpreter():
 
 
 def main():
+    # Must run before anything streams to stdout (Open Interpreter prints the
+    # model's reply live), or a single non-cp1252 character will crash the chat.
+    _force_utf8_stdio()
+
     if len(sys.argv) < 2:
         print("llm_runner: missing config path argument", file=sys.stderr)
         return 2
@@ -86,7 +162,7 @@ def main():
     interpreter.llm.model = cfg["model"]
     interpreter.llm.api_key = cfg.get("api_key", "fake_key")
     interpreter.llm.context_window = cfg.get("context_window", 40000)
-    interpreter.llm.max_tokens = cfg.get("max_tokens", 4096)
+    interpreter.llm.max_tokens = cfg.get("max_tokens", 8192)
     interpreter.auto_run = True  # never prompt for confirmation (like -y)
     if hasattr(interpreter.llm, "temperature"):
         interpreter.llm.temperature = 0
@@ -96,8 +172,12 @@ def main():
         interpreter.chat(cfg["prompt"])
     except Exception as e:
         print(f"llm_runner: exception during chat: {e}", file=sys.stderr)
+        # Still try to report context usage for the partial run before exiting.
+        _report_context_usage(interpreter, cfg)
         return 5
 
+    # Report how much of the context window this run consumed (-> contextLog.log).
+    _report_context_usage(interpreter, cfg)
     print("llm_runner: chat completed", flush=True)
     return 0
 
