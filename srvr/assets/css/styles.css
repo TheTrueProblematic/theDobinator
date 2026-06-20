@@ -108,7 +108,7 @@ html, body {
   gap: 1rem;
 }
 
-.power-btn, .history-btn, .update-btn, .pending-btn, .name-drive-btn {
+.power-btn, .history-btn, .update-btn, .pending-btn, .name-drive-btn, .print-btn {
   width: 48px;
   height: 48px;
   border-radius: 50%;
@@ -127,16 +127,16 @@ html, body {
   position: relative;
 }
 
-.power-btn:hover, .history-btn:hover, .pending-btn:hover, .name-drive-btn:hover {
+.power-btn:hover, .history-btn:hover, .pending-btn:hover, .name-drive-btn:hover, .print-btn:hover {
   transform: translateY(-2px) scale(1.05);
   background: var(--fg);
   color: var(--bg);
   box-shadow: 0 6px 18px rgba(0,0,0,.18);
 }
 
-.power-btn:active, .history-btn:active, .update-btn:active, .pending-btn:active, .name-drive-btn:active { transform: translateY(0) scale(.97); }
+.power-btn:active, .history-btn:active, .update-btn:active, .pending-btn:active, .name-drive-btn:active, .print-btn:active { transform: translateY(0) scale(.97); }
 
-.power-btn svg, .history-btn svg, .update-btn svg, .pending-btn svg, .name-drive-btn svg {
+.power-btn svg, .history-btn svg, .update-btn svg, .pending-btn svg, .name-drive-btn svg, .print-btn svg {
   width: 20px;
   height: 20px;
   display: block;
@@ -533,6 +533,38 @@ body[data-running="0"] .power-btn {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--fg) 12%, transparent);
 }
 select.form-input { cursor: pointer; }
+
+/* Group heading inside a form (e.g. "Label content" / "Printer settings"). */
+.form-section {
+  font-size: .7rem;
+  letter-spacing: .18em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-top: .35rem;
+  padding-bottom: .4rem;
+  border-bottom: 1px solid var(--card-border);
+}
+
+/* Inline result line under the Print Label form. */
+.print-status {
+  font-size: .85rem;
+  line-height: 1.45;
+  padding: .7rem .85rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--card-border);
+  word-break: break-word;
+}
+.print-status.is-pending { color: var(--muted); }
+.print-status.is-success {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 40%, var(--card-border));
+  background: color-mix(in srgb, var(--success) 8%, transparent);
+}
+.print-status.is-error {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--card-border));
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+}
 
 /* ---------- Pending-drive list items ---------- */
 

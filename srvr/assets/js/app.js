@@ -1,7 +1,7 @@
 // Top-level controller: polls status.json, hands off to render.js,
 // wires up the power button (which calls the companion API and re-polls fast).
 
-import { fetchStatus, togglePower, applyUpdate, scheduleUpdate, applyUpdateReboot, scheduleUpdateReboot, submitDrive } from './api.js';
+import { fetchStatus, togglePower, applyUpdate, scheduleUpdate, applyUpdateReboot, scheduleUpdateReboot, submitDrive, fetchPrintDefaults, printLabel } from './api.js';
 import { render, clearCompletedHistory } from './render.js';
 import { COUNTRIES } from './countries.js';
 
@@ -16,6 +16,8 @@ let fastPollUntil = 0;
 let powerInFlight = false;
 let updateInFlight = false;
 let driveSubmitInFlight = false;
+let printInFlight = false;
+let printDefaultsLoaded = false;
 
 // --- Blank-drive prompt state ---
 // `dismissedTokens` holds drives the user already confirmed (so we don't re-open
@@ -298,6 +300,136 @@ async function handleConfirmDrive() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Print Label (drives the separate driveLabelPrinter project via the API)
+// ---------------------------------------------------------------------------
+
+// Fallback defaults mirror driveLabelPrinter's example label.json, used if the
+// API can't be reached to read the operator's current values.
+const PRINT_FALLBACK_DEFAULTS = {
+  printer_name: 'Brother QL-810W',
+  cage_code: '5ET05',
+  qr_url: 'churchillnavigation.com/specifications',
+  copies: 1,
+  label_media: '0.94" Dia',
+  print_scale: 'noscale',
+  master_records_path: 'Z:\\SerialNumbers\\SERIAL_NUMBERS.txt',
+  label: { customer: '', purpose: '', hardware: 'Other', prepared_by: '', box_serial: '' },
+};
+
+function setVal(id, value) {
+  const el = document.getElementById(id);
+  if (el != null && value != null) el.value = value;
+}
+function getVal(id) {
+  const el = document.getElementById(id);
+  return el ? el.value : '';
+}
+
+function fillPrintForm(defaults) {
+  const d = defaults || PRINT_FALLBACK_DEFAULTS;
+  const label = (d && typeof d.label === 'object' && d.label) ? d.label : {};
+  setVal('printPrinterName', d.printer_name);
+  setVal('printCageCode', d.cage_code);
+  setVal('printQrUrl', d.qr_url);
+  setVal('printCopies', (typeof d.copies === 'number' && d.copies >= 1) ? d.copies : 1);
+  setVal('printLabelMedia', d.label_media);
+  setVal('printScale', d.print_scale || 'noscale');
+  setVal('printMasterPath', d.master_records_path);
+  setVal('printCustomer', label.customer);
+  setVal('printPurpose', label.purpose);
+  setVal('printHardware', label.hardware);
+  setVal('printPreparedBy', label.prepared_by);
+  setVal('printBoxSerial', label.box_serial);
+}
+
+function setPrintStatus(kind, text) {
+  const el = document.getElementById('printStatus');
+  if (!el) return;
+  if (!kind) { el.hidden = true; el.textContent = ''; el.className = 'print-status'; return; }
+  el.hidden = false;
+  el.className = `print-status is-${kind}`;
+  el.textContent = text;
+}
+
+async function openPrintModal() {
+  const modal = document.getElementById('printModal');
+  if (!modal) return;
+  setPrintStatus(null);
+  // Pre-fill once with the operator's current label.json (best effort).
+  if (!printDefaultsLoaded) {
+    fillPrintForm(PRINT_FALLBACK_DEFAULTS); // instant baseline, no flicker
+    try {
+      const res = await fetchPrintDefaults();
+      if (res && res.defaults) fillPrintForm(res.defaults);
+      printDefaultsLoaded = true;
+    } catch (err) {
+      console.warn('[Dobinator] could not load print defaults; using fallbacks:', err);
+    }
+  }
+  const confirmBtn = document.getElementById('confirmPrintBtn');
+  if (confirmBtn) { confirmBtn.classList.add('is-ready'); confirmBtn.disabled = false; }
+  modal.classList.remove('hidden');
+}
+
+function closePrintModal() {
+  document.getElementById('printModal')?.classList.add('hidden');
+}
+
+function collectPrintConfig() {
+  const copiesRaw = parseInt(getVal('printCopies'), 10);
+  return {
+    mode: getVal('printMode') || 'print',
+    printer_name: getVal('printPrinterName').trim(),
+    cage_code: getVal('printCageCode').trim(),
+    qr_url: getVal('printQrUrl').trim(),
+    copies: Number.isFinite(copiesRaw) && copiesRaw >= 1 ? copiesRaw : 1,
+    label_media: getVal('printLabelMedia').trim(),
+    print_scale: getVal('printScale') || 'noscale',
+    master_records_path: getVal('printMasterPath').trim(),
+    label: {
+      customer: getVal('printCustomer').trim(),
+      purpose: getVal('printPurpose').trim(),
+      hardware: getVal('printHardware').trim(),
+      prepared_by: getVal('printPreparedBy').trim(),
+      box_serial: getVal('printBoxSerial').trim(),
+    },
+  };
+}
+
+async function handlePrintLabel() {
+  if (printInFlight) return;
+  const confirmBtn = document.getElementById('confirmPrintBtn');
+  const config = collectPrintConfig();
+
+  if (!config.printer_name || !config.cage_code || !config.qr_url) {
+    setPrintStatus('error', 'Printer name, CAGE code, and QR URL are all required.');
+    return;
+  }
+
+  printInFlight = true;
+  if (confirmBtn) confirmBtn.disabled = true;
+  setPrintStatus('pending', 'Sending to the label printer…');
+  try {
+    const res = await printLabel(config);
+    if (res && res.ok) {
+      setPrintStatus('success', res.message || 'Label printed.');
+      setTimeout(closePrintModal, 1500);
+    } else {
+      setPrintStatus('error', (res && res.message) || 'The label printer reported a failure.');
+    }
+  } catch (err) {
+    console.error('[Dobinator] print label failed:', err);
+    setPrintStatus(
+      'error',
+      'Could not reach the print endpoint. Check that the companion API (srvr_api.py) is running on port 5050.'
+    );
+  } finally {
+    printInFlight = false;
+    if (confirmBtn) confirmBtn.disabled = false;
+  }
+}
+
 function wireDelegatedEvents() {
   document.addEventListener('click', (e) => {
     const btn = e.target.closest('#powerBtn');
@@ -339,6 +471,16 @@ function wireDelegatedEvents() {
     if (e.target.closest('#confirmDriveBtn')) handleConfirmDrive();
     if (e.target.closest('#closeDrivePromptBtn')) closeDrivePromptManually();
     if (e.target.closest('#nameDriveBtn')) reopenDrivePrompt();
+
+    // --- Print Label modal: open / confirm / close ---
+    if (e.target.closest('#printBtn')) openPrintModal();
+    if (e.target.closest('#confirmPrintBtn')) handlePrintLabel();
+    if (
+      e.target.closest('#closePrintBtn') ||
+      e.target.closest('#printModalBackdrop')
+    ) {
+      closePrintModal();
+    }
 
     // --- Update flow ---
     const updateBtn = e.target.closest('#updateBtn');

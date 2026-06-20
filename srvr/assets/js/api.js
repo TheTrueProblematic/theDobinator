@@ -96,6 +96,21 @@ export async function submitDrive({ token, name, country }) {
   return postToApi('/submit-drive', { token, name, country });
 }
 
+// Fetch the installed driveLabelPrinter label.json so the Print Label form can
+// be pre-filled with the operator's current values.
+export async function fetchPrintDefaults() {
+  const url = `${window.location.protocol}//${window.location.hostname}:${API_PORT}/print-defaults`;
+  const res = await fetch(url, { method: 'GET', mode: 'cors' });
+  if (!res.ok) throw new Error(`/print-defaults returned HTTP ${res.status}`);
+  return res.json();
+}
+
+// Render + print one drive label via the driveLabelPrinter project. `config`
+// carries every label.json parameter plus a `mode` (print | test | render).
+export async function printLabel(config) {
+  return postToApi('/print-label', config);
+}
+
 async function postToApi(path, body = {}) {
   const url = `${window.location.protocol}//${window.location.hostname}:${API_PORT}${path}`;
   const res = await fetch(url, {

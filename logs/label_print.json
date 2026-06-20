@@ -1,0 +1,16 @@
+{
+  "printer_name": "Brother QL-810W",
+  "cage_code": "5ET05",
+  "qr_url": "churchillnavigation.com/specifications",
+  "copies": 2,
+  "label_media": "0.94\" Dia",
+  "print_scale": "noscale",
+  "master_records_path": "Z:\\SerialNumbers\\SERIAL_NUMBERS.txt",
+  "label": {
+    "customer": "TestCo",
+    "purpose": "Master",
+    "hardware": "Other",
+    "prepared_by": "Max",
+    "box_serial": "123456"
+  }
+}
