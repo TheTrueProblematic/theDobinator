@@ -4,6 +4,7 @@ import {
   UNLOCK_WINDOW_MS,
   UNLOCK_HINT_AT,
   ADMIN_STORAGE_KEY,
+  ADMIN_PASSWORD,
 } from './constants.js';
 
 function readStored() {
@@ -24,21 +25,29 @@ function writeStored(on) {
 }
 
 /**
- * The secret handshake: UNLOCK_CLICKS taps on the brand mark inside
- * UNLOCK_WINDOW_MS. Clicks older than the window are dropped, so a slow,
- * accidental series never accumulates. Once unlocked it's remembered per
- * browser, and the panel's own lock button clears it.
+ * Two gates guard the admin panel.
+ *
+ * 1. The handshake — UNLOCK_CLICKS taps on the brand mark inside
+ *    UNLOCK_WINDOW_MS. Clicks older than the window are dropped, so a slow,
+ *    accidental series never accumulates.
+ * 2. The password — clearing the handshake opens a prompt; only a correct
+ *    password actually unlocks.
+ *
+ * Once unlocked it's remembered per browser (no password on reload), and the
+ * panel's own lock button clears it.
  */
 export default function useAdminUnlock() {
   const [unlocked, setUnlocked] = useState(readStored);
   const [hinting, setHinting] = useState(false);
+  const [asking, setAsking] = useState(false);      // password prompt open
+  const [authError, setAuthError] = useState('');
   const [justUnlocked, setJustUnlocked] = useState(false);
   const clicksRef = useRef([]);
   const hintTimer = useRef(null);
 
   const registerClick = useCallback(() => {
-    // Already in: a tap on the mark is a no-op (use the lock button to leave).
-    if (unlocked) return;
+    // Already in, or already being asked: a tap on the mark is a no-op.
+    if (unlocked || asking) return;
 
     const now = Date.now();
     const recent = clicksRef.current.filter((t) => now - t < UNLOCK_WINDOW_MS);
@@ -48,9 +57,8 @@ export default function useAdminUnlock() {
     if (recent.length >= UNLOCK_CLICKS) {
       clicksRef.current = [];
       setHinting(false);
-      setUnlocked(true);
-      writeStored(true);
-      setJustUnlocked(true);
+      setAuthError('');
+      setAsking(true);   // handshake cleared — now prove it
       return;
     }
 
@@ -61,16 +69,49 @@ export default function useAdminUnlock() {
       if (hintTimer.current) clearTimeout(hintTimer.current);
       hintTimer.current = setTimeout(() => setHinting(false), 450);
     }
-  }, [unlocked]);
+  }, [unlocked, asking]);
+
+  // Returns true when the password was right (so the dialog can close itself).
+  const submitPassword = useCallback((value) => {
+    if (String(value) !== ADMIN_PASSWORD) {
+      setAuthError('Incorrect password.');
+      return false;
+    }
+    setAsking(false);
+    setAuthError('');
+    setUnlocked(true);
+    writeStored(true);
+    setJustUnlocked(true);
+    return true;
+  }, []);
+
+  const cancelPassword = useCallback(() => {
+    setAsking(false);
+    setAuthError('');
+    clicksRef.current = [];
+  }, []);
 
   const lock = useCallback(() => {
     clicksRef.current = [];
     setUnlocked(false);
     setJustUnlocked(false);
+    setAsking(false);
+    setAuthError('');
     writeStored(false);
   }, []);
 
   const clearJustUnlocked = useCallback(() => setJustUnlocked(false), []);
 
-  return { unlocked, hinting, justUnlocked, registerClick, lock, clearJustUnlocked };
+  return {
+    unlocked,
+    hinting,
+    asking,
+    authError,
+    justUnlocked,
+    registerClick,
+    submitPassword,
+    cancelPassword,
+    lock,
+    clearJustUnlocked,
+  };
 }

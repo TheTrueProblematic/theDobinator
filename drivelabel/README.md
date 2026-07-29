@@ -126,6 +126,8 @@ elevation: nothing here formats a disk or reboots the PC.
 | `GET`  | `/health`         | Liveness. `{"ok": true, "service": "drivelabel_api"}` |
 | `GET`  | `/print-defaults` | Reads `C:\driveLabelPrinter\label.json` so the admin-only printer settings match the box |
 | `POST` | `/print-label`    | Validates, writes `logs/label_print.json`, runs driveLabelPrinter synchronously, returns the real result |
+| `GET`  | `/update-status`  | Whether theDobinator has a pending update, needs a reboot for it, and is mid-build |
+| `POST` | `/apply-update`   | Applies or schedules that update, by proxying to theDobinator's API on 5050 |
 
 `driveLabelPrinter` is a **separate repo installed at `C:\driveLabelPrinter`**
 (override with `DOB_LABEL_PRINTER_DIR`). We only ever *read* its `label.json` and
@@ -182,19 +184,62 @@ out of room first.
 
 ### The secret admin menu
 
-Five clicks on the brand mark (top-left circle) inside 3.5 seconds. A rolling
-window, so five clicks a second apart never add up — you have to mean it. The
-mark gives a small wiggle from the third click so a deliberate explorer knows
-they're onto something.
+Two gates:
 
-Once unlocked it's remembered in `localStorage` per browser, and the panel's
-**Lock** button hides it again (and resets Mode back to `print`). Tuning lives in
-`app/src/constants.js` — `UNLOCK_CLICKS`, `UNLOCK_WINDOW_MS`, `UNLOCK_HINT_AT`.
+1. **The handshake** — five clicks on the brand mark (top-left square) inside 3.5
+   seconds. A rolling window, so five clicks a second apart never add up; you have
+   to mean it. The mark gives a small wiggle from the third click so a deliberate
+   explorer knows they're onto something.
+2. **The password** — clearing the handshake opens a prompt. A wrong entry shows
+   an inline error and clears the field; the panel stays hidden.
 
-This is obscurity, not security. Anyone who reads the JS can find it, and the API
-accepts any valid body regardless. It exists to keep printer settings out of the
-way of people who shouldn't casually change them — not to defend against someone
-determined.
+Once unlocked it's remembered in `localStorage` per browser (no password on
+reload), and the panel's **Lock** button hides it again and resets Mode back to
+`print`. Tuning lives in `app/src/constants.js` — `UNLOCK_CLICKS`,
+`UNLOCK_WINDOW_MS`, `UNLOCK_HINT_AT`, `ADMIN_PASSWORD`.
+
+**⚠️ This is obscurity, not security.** The password is checked in the browser, so
+it ships inside the JS bundle and anyone who opens devtools can read it — and the
+API accepts any valid body whether or not it was ever entered. It exists to keep
+printer settings out of the way of people who shouldn't casually change them. If
+these settings ever need genuine protection, that has to move server-side into
+`label_api.py`.
+
+### The update button
+
+The topbar carries the same pending-update indicator theDobinator's portal does:
+hidden until an update exists, amber normally, red when the update needs a full PC
+restart. It follows the same rules, too — mid-build it offers to schedule the
+update instead of applying it, and a reboot-update asks for confirmation first.
+
+It works without any cross-origin calls to the other site:
+
+- **State** comes from `GET /update-status`, which reads `srvr/status.json`
+  straight off disk. Same repo, so no CORS headers had to be added to
+  theDobinator's `web.config`.
+- **Actions** go through `POST /apply-update`, which proxies to theDobinator's own
+  API on `127.0.0.1:5050`. The update logic is not duplicated here.
+
+The reboot-vs-normal decision is made **server-side** from `status.json`, not
+taken from the request body, so the two portals can never disagree about which
+kind of update is pending. `/apply-update` also refuses to apply immediately while
+a drive is processing, independently of what the UI allows.
+
+Polling is every 15s (`UPDATE_POLL_MS`) — this is a badge, not the Dobinator's
+live drive progress, so it doesn't need per-second updates. A failed poll hides
+the button rather than showing one that can't work.
+
+### Colour
+
+The accent is SHOTOVER orange, `#fb8333`. Two things to know before using it:
+
+- **`--accent-fg` is near-black, not white.** White on `#fb8333` is only 2.5:1;
+  `#101114` is 7.6:1. So filled accent buttons carry dark text.
+- **`--accent-ink` exists for text.** The orange is too light to use as a text
+  colour on a light background (2.5:1 on white), so anything rendering the accent
+  as *text or an icon* uses `--accent-ink` — a darkened orange in light mode, and
+  the plain orange in dark mode where it already has 6.4:1. If you add accent-
+  coloured text, use `--accent-ink`; `--accent` is for fills, borders and rings.
 
 ### Dark-mode extensions
 

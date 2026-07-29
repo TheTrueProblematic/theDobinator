@@ -1,10 +1,19 @@
 import { DOBINATOR_URL } from '../constants.js';
 import { LabelMark, DriveIcon, KeyIcon } from './Icons.jsx';
+import UpdateButton from './UpdateButton.jsx';
 
 // The brand mark is also the secret admin trigger (see useAdminUnlock). It stays
 // a real <button> so it's keyboard- and screen-reader-reachable, but it carries
 // no visible hint until someone is clearly poking at it on purpose.
-export default function TopBar({ onSecretClick, hinting, adminUnlocked }) {
+export default function TopBar({
+  onSecretClick,
+  hinting,
+  adminUnlocked,
+  updateAvailable,
+  updateReboot,
+  updateBusy,
+  onUpdateClick,
+}) {
   return (
     <header className="topbar">
       <div className="brand">
@@ -23,20 +32,23 @@ export default function TopBar({ onSecretClick, hinting, adminUnlocked }) {
         </button>
         <span className="brand-text">
           <span className="brand-name">Drive Label</span>
-          <span className="brand-sub">Churchill Navigation</span>
+          <span className="brand-sub">SHOTOVER</span>
         </span>
       </div>
 
       <div className="topbar-actions">
+        {updateAvailable && (
+          <UpdateButton reboot={updateReboot} busy={updateBusy} onClick={onUpdateClick} />
+        )}
         <a
           className="icon-btn has-tip"
           href={DOBINATOR_URL}
           target="_blank"
           rel="noopener"
-          aria-label="Build Drive"
+          aria-label="Build a Drive"
         >
           <DriveIcon />
-          <span className="tip" role="tooltip">Build Drive</span>
+          <span className="tip" role="tooltip">Build a Drive</span>
         </a>
       </div>
     </header>

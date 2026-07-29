@@ -12,6 +12,7 @@ export const DOBINATOR_URL = 'http://dobinator.c-nav.com/';
 
 // Hardware choices, in the order the operators asked for. Recorded by
 // driveLabelPrinter into the master records file; not printed on the label.
+// "Other" stays last by convention — add new entries above it.
 export const HARDWARE_OPTIONS = [
   'ARS600',
   'Getac',
@@ -25,6 +26,7 @@ export const HARDWARE_OPTIONS = [
   'GCS',
   'AIRSCAPE',
   'MC1',
+  'Oscar',
   'Other',
 ];
 
@@ -66,14 +68,24 @@ export const EMPTY_LABEL = {
 };
 
 // --- Secret admin unlock -----------------------------------------------------
-// Five clicks on the brand mark inside this window reveals Mode + printer
-// settings. Deliberately something nobody stumbles into: a single stray click
+// Two gates. First the handshake: five clicks on the brand mark inside this
+// window. Deliberately something nobody stumbles into — a single stray click
 // does nothing, and the only hint (a small wiggle) doesn't appear until click
-// three, by which point you're clearly poking at it on purpose.
+// three, by which point you're clearly poking at it on purpose. Then a password.
 export const UNLOCK_CLICKS = 5;
-// Rolling window: the 5 clicks must span less than this. Generous enough to be
-// comfortable on a phone, far too fast to happen by accident — a stray click a
-// second apart never accumulates.
 export const UNLOCK_WINDOW_MS = 3500;
 export const UNLOCK_HINT_AT = 3;
 export const ADMIN_STORAGE_KEY = 'drivelabel_admin_unlocked';
+
+// ⚠️ This is checked in the browser, so it IS present in the shipped JS bundle
+// and anyone who opens devtools can read it. It exists to keep printer settings
+// out of casual reach — it is NOT a security boundary, and the API accepts any
+// valid body regardless of whether this was ever entered. Do not treat it as
+// protecting anything that matters.
+export const ADMIN_PASSWORD = 'sh0t0ver';
+
+// --- Update indicator --------------------------------------------------------
+// How often to ask the API whether theDobinator has an update pending. The
+// Dobinator's own portal polls its status every second because it renders live
+// drive progress; here it's just a badge, so poll far more gently.
+export const UPDATE_POLL_MS = 15000;

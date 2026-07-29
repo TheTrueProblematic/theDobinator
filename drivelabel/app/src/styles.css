@@ -49,13 +49,20 @@
   --border: #e3e5ec;
   --border-strong: #c9cdd8;
 
-  --accent: #4f46e5;
-  --accent-hover: #4338ca;
-  --accent-fg: #ffffff;
-  --accent-soft: #eeeefc;
+  /* SHOTOVER orange. Note --accent-fg is DARK, not white: white on #fb8333 is
+     only 2.5:1, while near-black is 7.6:1. And because the orange itself is too
+     light to use as text on a light background, anything that renders the accent
+     as *text* uses --accent-ink instead of --accent. */
+  --accent: #fb8333;
+  --accent-hover: #e66f1c;
+  --accent-fg: #101114;
+  --accent-soft: #fff0e4;
+  --accent-ink: #8f4210;
 
   --success: #0f7a45;
   --success-soft: #e9f6ef;
+  --warning: #a35a06;
+  --warning-soft: #fdf2e3;
   --danger: #c02626;
   --danger-soft: #fdecec;
 
@@ -74,13 +81,18 @@
     --border: #262c34;
     --border-strong: #39414c;
 
-    --accent: #8b8cf7;
-    --accent-hover: #a3a4fa;
+    --accent: #fb8333;
+    --accent-hover: #fd9b58;
     --accent-fg: #101114;
-    --accent-soft: #1e2033;
+    --accent-soft: #2e1c0f;
+    /* On a dark surface the orange has plenty of contrast on its own (6.4:1), so
+       ink and fill can be the same colour here. */
+    --accent-ink: #fb8333;
 
     --success: #3ecf8e;
     --success-soft: #11251c;
+    --warning: #f5b45c;
+    --warning-soft: #2b2010;
     --danger: #ff7b72;
     --danger-soft: #2a1719;
 
@@ -162,7 +174,7 @@ button, input, select { font: inherit; color: inherit; }
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background-color: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-ink);
   display: grid;
   place-items: center;
   cursor: pointer;
@@ -197,7 +209,7 @@ button, input, select { font: inherit; color: inherit; }
   height: 18px;
   border-radius: 50%;
   background-color: var(--surface);
-  color: var(--accent);
+  color: var(--accent-ink);
   border: 1px solid var(--border-strong);
   display: grid;
   place-items: center;
@@ -483,7 +495,7 @@ button, input, select { font: inherit; color: inherit; }
   font-weight: 600;
   letter-spacing: .16em;
   text-transform: uppercase;
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 
 .admin-title-icon { width: 14px; height: 14px; }
@@ -739,25 +751,23 @@ button, input, select { font: inherit; color: inherit; }
   width: 18px;
   height: 18px;
   margin-top: .1rem;
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 
 .toast-icon svg { width: 18px; height: 18px; }
 
-.toast-body { min-width: 0; }
-
 .toast-title {
-  display: block;
+  min-width: 0;
   font-size: .88rem;
   font-weight: 600;
   color: var(--fg);
+  overflow-wrap: anywhere;
 }
 
-.toast-sub {
-  display: block;
-  font-size: .78rem;
-  color: var(--muted);
-}
+/* A failure keeps the icon + wording and only adds colour on top, so the tone
+   never carries the meaning by itself. */
+.toast.is-danger { border-color: var(--danger); }
+.toast.is-danger .toast-icon { color: var(--danger); }
 
 .toast-close {
   flex-shrink: 0;
@@ -776,25 +786,142 @@ button, input, select { font: inherit; color: inherit; }
 
 .toast-close:hover { color: var(--fg); background-color: var(--surface-2); }
 
-/* ---------- Footer ---------- */
+/* ---------- Update button (hidden until theDobinator has an update) ----------
+   Amber normally, red when the update needs a full PC restart — the same
+   two-state signal theDobinator's own portal uses, so operators read it the
+   same way on both sites. The pulse is what draws the eye; the colour only
+   distinguishes "update" from "update + restart". */
 
-.foot {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: center;
-  gap: .45rem;
-  padding: 1.25rem 1rem calc(1.25rem + env(safe-area-inset-bottom));
-  font-family: var(--font-mono);
-  font-size: .66rem;
-  letter-spacing: .1em;
-  text-transform: uppercase;
-  background-color: var(--bg);
-  color: var(--muted);
-  border-top: 1px solid var(--border);
+.update-btn {
+  border-color: var(--warning);
+  color: var(--warning);
+  animation: updatePulse 2.4s ease-in-out infinite;
 }
 
-.foot-dot { color: var(--border-strong); }
+.update-btn:hover:not(:disabled) {
+  background-color: var(--warning);
+  color: var(--accent-fg);
+  border-color: var(--warning);
+}
+
+@keyframes updatePulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(163, 90, 6, .45); }
+  50%      { box-shadow: 0 0 0 6px rgba(163, 90, 6, 0); }
+}
+
+.update-btn.is-reboot {
+  border-color: var(--danger);
+  color: var(--danger);
+  animation: rebootPulse 2.4s ease-in-out infinite;
+}
+
+.update-btn.is-reboot:hover:not(:disabled) {
+  background-color: var(--danger);
+  color: #ffffff;
+  border-color: var(--danger);
+}
+
+@keyframes rebootPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(192, 38, 38, .5); }
+  50%      { box-shadow: 0 0 0 6px rgba(192, 38, 38, 0); }
+}
+
+.update-btn:disabled { cursor: progress; }
+
+/* ---------- Dialogs (admin password, update confirmation) ---------- */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+
+/* Deliberately a flat scrim rather than a blur: a backdrop-filter behind a
+   dialog is exactly the kind of thing a dark-mode extension makes unreadable. */
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background-color: rgba(6, 8, 12, .58);
+}
+
+.modal-panel {
+  position: relative;
+  width: 100%;
+  max-width: 400px;
+  padding: clamp(1.15rem, 4vw, 1.5rem);
+  background-color: var(--surface);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  animation: dialogIn .26s var(--ease) both;
+}
+
+@keyframes dialogIn {
+  from { opacity: 0; transform: translateY(8px) scale(.985); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.modal-title {
+  margin-bottom: .85rem;
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: -.01em;
+  color: var(--fg);
+}
+
+.modal-body { min-width: 0; }
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: .6rem;
+  margin-top: 1.1rem;
+}
+
+.dialog-form {
+  display: flex;
+  flex-direction: column;
+  gap: .8rem;
+}
+
+.dialog-form .modal-footer { margin-top: .3rem; }
+
+.dialog-text {
+  font-size: .92rem;
+  line-height: 1.5;
+  color: var(--fg-2);
+}
+
+.dialog-error {
+  display: flex;
+  align-items: center;
+  gap: .45rem;
+  padding: .55rem .7rem;
+  font-size: .85rem;
+  background-color: var(--danger-soft);
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+}
+
+.dialog-error-icon { flex-shrink: 0; width: 16px; height: 16px; }
+
+/* The dialog buttons reuse .ghost-btn / .print-btn so there's one button
+   language on the site; these only undo .print-btn's full-width block sizing. */
+.dialog-btn { padding: .6rem 1rem; font-size: .82rem; }
+
+.dialog-btn-primary {
+  margin-top: 0;
+  width: auto;
+  min-height: 0;
+  padding: .6rem 1.1rem;
+  font-size: .88rem;
+}
 
 /* ---------- Desktop: form left, sticky preview rail right ----------
    The preview is FIRST in the DOM so it leads on mobile (it orients you before

@@ -1156,4 +1156,43 @@ select.form-input { cursor: pointer; }
   .stage { padding-bottom: 140px; } /* Smaller scene on mobile */
   .test-shell { grid-template-columns: 1fr; }
   .test-preview iframe { height: 60vh; }
+
+  /* Stack the topbar on phones. Six 48px buttons plus 1rem gaps need ~368px on
+     their own, so side-by-side with the title they used to shove each other off
+     both edges. Title on its own row above, buttons centred beneath. */
+  .topbar {
+    flex-direction: column;
+    align-items: center;
+    gap: .85rem;
+  }
+
+  .topbar-actions {
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: .6rem;
+  }
+
+  .power-btn, .history-btn, .update-btn, .pending-btn, .name-drive-btn, .print-btn {
+    width: 44px;
+    height: 44px;
+  }
+}
+
+/* Narrow phones (360px and under): trim a little further so all six buttons
+   still fit on one row rather than wrapping to two. */
+@media (max-width: 400px) {
+  .topbar { padding: .9rem 1rem; }
+
+  .topbar-actions { gap: .45rem; }
+
+  .power-btn, .history-btn, .update-btn, .pending-btn, .name-drive-btn, .print-btn {
+    width: 42px;
+    height: 42px;
+  }
+
+  .power-btn svg, .history-btn svg, .update-btn svg, .pending-btn svg,
+  .name-drive-btn svg, .print-btn svg {
+    width: 18px;
+    height: 18px;
+  }
 }

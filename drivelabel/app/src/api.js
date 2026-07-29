@@ -32,3 +32,27 @@ export async function printLabel(config) {
   if (body && typeof body.ok === 'boolean') return body;
   throw new Error(`/print-label returned HTTP ${res.status}`);
 }
+
+// Whether theDobinator has a pending update, whether it needs a reboot, and
+// whether a drive is mid-build (which blocks applying it right now). Read by the
+// API straight off theDobinator's status.json — no cross-origin call needed.
+export async function fetchUpdateStatus() {
+  const res = await fetch(apiUrl('/update-status'), { method: 'GET', mode: 'cors' });
+  if (!res.ok) throw new Error(`/update-status returned HTTP ${res.status}`);
+  return res.json();
+}
+
+// Apply (or schedule) theDobinator's pending update. The API proxies this to
+// theDobinator's own API on 5050 and decides the reboot-vs-normal variant from
+// status.json, so the two portals can never disagree about which it is.
+export async function applyUpdate({ schedule = false } = {}) {
+  const res = await fetch(apiUrl('/apply-update'), {
+    method: 'POST',
+    mode: 'cors',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ schedule }),
+  });
+  const body = await res.json().catch(() => null);
+  if (body && typeof body.ok === 'boolean') return body;
+  throw new Error(`/apply-update returned HTTP ${res.status}`);
+}

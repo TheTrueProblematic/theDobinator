@@ -5,11 +5,14 @@ import AdminPanel from './components/AdminPanel.jsx';
 import LabelPreview from './components/LabelPreview.jsx';
 import StatusBanner from './components/StatusBanner.jsx';
 import Toast from './components/Toast.jsx';
+import Modal from './components/Modal.jsx';
+import PasswordDialog from './components/PasswordDialog.jsx';
 import { TextField, SelectField } from './components/Field.jsx';
 import { PrinterIcon } from './components/Icons.jsx';
 
 import useAdminUnlock from './useAdminUnlock.js';
-import { fetchPrintDefaults, printLabel } from './api.js';
+import useUpdateStatus from './useUpdateStatus.js';
+import { fetchPrintDefaults, printLabel, applyUpdate } from './api.js';
 import {
   EMPTY_LABEL,
   HARDWARE_OPTIONS,
@@ -44,8 +47,13 @@ export default function App() {
   const [defaultsSource, setDefaultsSource] = useState('fallback');
   const [status, setStatus] = useState({ kind: null, message: '' });
   const [inFlight, setInFlight] = useState(false);
+  const [toast, setToast] = useState(null);
+  // null | 'schedule' | 'reboot' — which update confirmation is showing.
+  const [updatePrompt, setUpdatePrompt] = useState(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
 
   const admin = useAdminUnlock();
+  const update = useUpdateStatus();
 
   // Pull the operator's real printer configuration off the box. Label content is
   // deliberately NOT seeded from it — those fields always start blank.
@@ -67,6 +75,18 @@ export default function App() {
     return () => { alive = false; };
   }, []);
 
+  // Surface the admin unlock as a toast, then reset the one-shot flag.
+  useEffect(() => {
+    if (!admin.justUnlocked) return;
+    setToast({ title: 'Admin mode unlocked', icon: 'key', tone: 'accent' });
+    admin.clearJustUnlocked();
+  }, [admin.justUnlocked, admin.clearJustUnlocked]);
+
+  // Stable identity matters: Toast restarts its auto-dismiss timer whenever
+  // onDone changes, so an inline arrow here would keep the toast alive for as
+  // long as the operator kept typing.
+  const dismissToast = useCallback(() => setToast(null), []);
+
   const setLabelField = (key) => (value) => setLabel((prev) => ({ ...prev, [key]: value }));
 
   const clearLabel = useCallback(() => {
@@ -78,6 +98,47 @@ export default function App() {
     () => PRINT_MODES.find((m) => m.value === mode)?.action ?? 'Print Label',
     [mode]
   );
+
+  // --- Update flow ---------------------------------------------------------
+  // Mirrors theDobinator's rules: can't apply mid-build (offer to schedule it
+  // instead), and a reboot-update needs explicit confirmation because it
+  // restarts the whole PC.
+
+  const runUpdate = useCallback(async (schedule) => {
+    setUpdateBusy(true);
+    setUpdatePrompt(null);
+    try {
+      const res = await applyUpdate({ schedule });
+      setToast(
+        res && res.ok
+          ? {
+              title: schedule ? 'Update scheduled' : 'Update started',
+              icon: 'update',
+              tone: 'accent',
+            }
+          : {
+              title: (res && res.message) || 'Could not start the update.',
+              icon: 'alert',
+              tone: 'danger',
+            }
+      );
+    } catch (err) {
+      console.error('[drivelabel] update failed:', err);
+      setToast({ title: 'Could not reach the update service.', icon: 'alert', tone: 'danger' });
+    } finally {
+      setUpdateBusy(false);
+      update.refresh();
+    }
+  }, [update]);
+
+  function handleUpdateClick() {
+    if (updateBusy) return;
+    if (update.status.processing) { setUpdatePrompt('schedule'); return; }
+    if (update.status.reboot) { setUpdatePrompt('reboot'); return; }
+    runUpdate(false);
+  }
+
+  // --- Print ---------------------------------------------------------------
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -139,18 +200,37 @@ export default function App() {
     }
   }
 
+  const promptCopy = updatePrompt === 'schedule'
+    ? {
+        title: update.status.reboot ? 'Restart Required' : 'Update Available',
+        body: update.status.reboot
+          ? 'This update requires restarting the PC, which can’t happen while a drive is processing. Schedule it to update and restart once processing completes?'
+          : 'The update can’t be applied while a drive is processing. Schedule it for when processing completes?',
+        confirm: update.status.reboot ? 'Schedule restart' : 'Schedule',
+        schedule: true,
+      }
+    : {
+        title: 'Restart Required',
+        body: 'This update requires restarting the PC. Update now and restart?',
+        confirm: 'Update and restart',
+        schedule: false,
+      };
+
   return (
     <div className="shell">
       <TopBar
         onSecretClick={admin.registerClick}
         hinting={admin.hinting}
         adminUnlocked={admin.unlocked}
+        updateAvailable={update.status.available}
+        updateReboot={update.status.reboot}
+        updateBusy={updateBusy}
+        onUpdateClick={handleUpdateClick}
       />
 
       <main className="wrap">
         <div className="intro">
           <h1 className="intro-title">Print a drive label</h1>
-          <p className="intro-sub">Fill in the details, hit print, stick it on.</p>
         </div>
 
         <div className="layout">
@@ -171,21 +251,21 @@ export default function App() {
               label="Customer"
               value={label.customer}
               onChange={setLabelField('customer')}
-              placeholder="e.g. Australia"
+              placeholder="e.g. Texas DPS"
             />
             <TextField
               id="purpose"
               label="Purpose"
               value={label.purpose}
               onChange={setLabelField('purpose')}
-              placeholder="e.g. Master"
+              placeholder="e.g. DATA DRIVE"
             />
             <TextField
               id="boxSerial"
               label="Box Serial"
               value={label.box_serial}
               onChange={setLabelField('box_serial')}
-              placeholder="e.g. 000000"
+              placeholder="e.g. 190000"
             />
             <SelectField
               id="hardware"
@@ -200,7 +280,7 @@ export default function App() {
               label="Prepared By"
               value={label.prepared_by}
               onChange={setLabelField('prepared_by')}
-              placeholder="e.g. Max"
+              placeholder="e.g. Garrett"
             />
 
             {admin.unlocked && (
@@ -228,13 +308,44 @@ export default function App() {
         </div>
       </main>
 
-      <footer className="foot">
-        <span>Drive Label</span>
-        <span className="foot-dot" aria-hidden="true">·</span>
-        <span>one round sticker at a time</span>
-      </footer>
+      {admin.asking && (
+        <PasswordDialog
+          onSubmit={admin.submitPassword}
+          onCancel={admin.cancelPassword}
+          error={admin.authError}
+        />
+      )}
 
-      {admin.justUnlocked && <Toast onDone={admin.clearJustUnlocked} />}
+      {updatePrompt && (
+        <Modal
+          title={promptCopy.title}
+          onClose={() => setUpdatePrompt(null)}
+          labelledBy="updatePromptTitle"
+          footer={
+            <>
+              <button type="button" className="ghost-btn dialog-btn"
+                      onClick={() => setUpdatePrompt(null)}>
+                Cancel
+              </button>
+              <button type="button" className="print-btn dialog-btn-primary"
+                      onClick={() => runUpdate(promptCopy.schedule)}>
+                {promptCopy.confirm}
+              </button>
+            </>
+          }
+        >
+          <p className="dialog-text">{promptCopy.body}</p>
+        </Modal>
+      )}
+
+      {toast && (
+        <Toast
+          title={toast.title}
+          icon={toast.icon}
+          tone={toast.tone}
+          onDone={dismissToast}
+        />
+      )}
     </div>
   );
 }

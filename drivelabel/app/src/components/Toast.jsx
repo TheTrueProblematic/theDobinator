@@ -1,21 +1,28 @@
 import { useEffect } from 'react';
-import { KeyIcon } from './Icons.jsx';
+import { KeyIcon, CheckIcon, AlertIcon, UpdateIcon } from './Icons.jsx';
 
-// One-shot confirmation that the secret handshake worked. Auto-dismisses so it
+const ICONS = {
+  key: KeyIcon,
+  check: CheckIcon,
+  alert: AlertIcon,
+  update: UpdateIcon,
+};
+
+// Transient one-liner: admin unlocked, update started, update failed. Carries an
+// icon as well as a tone so it doesn't rely on colour alone. Auto-dismisses so it
 // never becomes furniture.
-export default function Toast({ onDone, ttlMs = 4200 }) {
+export default function Toast({ title, icon = 'check', tone = 'accent', onDone, ttlMs = 4200 }) {
   useEffect(() => {
     const t = setTimeout(onDone, ttlMs);
     return () => clearTimeout(t);
-  }, [onDone, ttlMs]);
+  }, [onDone, ttlMs, title]);
+
+  const Icon = ICONS[icon] || CheckIcon;
 
   return (
-    <div className="toast" role="status" aria-live="polite">
-      <span className="toast-icon" aria-hidden="true"><KeyIcon /></span>
-      <span className="toast-body">
-        <strong className="toast-title">Admin mode unlocked</strong>
-        <span className="toast-sub">Printer settings are yours. Be gentle.</span>
-      </span>
+    <div className={`toast is-${tone}`} role="status" aria-live="polite">
+      <span className="toast-icon" aria-hidden="true"><Icon /></span>
+      <span className="toast-title">{title}</span>
       <button type="button" className="toast-close" onClick={onDone} aria-label="Dismiss">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
              strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

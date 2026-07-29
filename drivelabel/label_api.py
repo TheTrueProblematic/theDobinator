@@ -16,6 +16,10 @@ GET  /print-defaults -> returns the installed driveLabelPrinter label.json so th
 POST /print-label    -> renders + prints one drive label via driveLabelPrinter
                         (at C:/driveLabelPrinter); runs synchronously and returns
                         the real result
+GET  /update-status  -> whether theDobinator has a pending update, needs a reboot
+                        for it, and is mid-build (read off its status.json)
+POST /apply-update   -> applies or schedules that update by proxying to
+                        theDobinator's own API on 5050
 GET  /health         -> liveness check; returns 200 {"ok": true}
 *    *               -> 404
 
@@ -31,6 +35,8 @@ import logging
 import os
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from logging.handlers import RotatingFileHandler
 
@@ -42,9 +48,17 @@ SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))                    # ..
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)                                   # ...\theDobinator
 LOGS_DIR    = os.path.join(PROJECT_DIR, "logs")
 LOG_FILE    = os.path.join(LOGS_DIR, "labelApi.log")
+# theDobinator's status file — the source of truth for whether an update is
+# pending. It sits in the same repo, so we read it off disk instead of making a
+# cross-origin HTTP call to the other site (which would need CORS headers added
+# to theDobinator's web.config).
+DOB_STATUS_FILE = os.path.join(PROJECT_DIR, "srvr", "status.json")
 
 HOST = os.environ.get("LABEL_API_HOST", "0.0.0.0")
 PORT = int(os.environ.get("LABEL_API_PORT", "5051"))
+# theDobinator's companion API. Update actions are proxied there rather than
+# reimplemented, so there is only ever one copy of the update logic.
+DOB_API_BASE = os.environ.get("DOB_API_BASE", "http://127.0.0.1:5050")
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -242,6 +256,103 @@ def print_label(body: dict) -> tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
+# theDobinator update passthrough
+# ---------------------------------------------------------------------------
+#
+# This site shows the same update badge its sibling does. Rather than duplicate
+# the update logic, we read theDobinator's status.json for the *state* and proxy
+# the *action* to its API on 5050.
+
+
+def read_update_status() -> dict:
+    """Read theDobinator's status.json and report the update state.
+
+    `processing` mirrors isProcessing() in theDobinator's app.js: running, and on
+    an in-progress step (1–9 for build/format/country, 12–14 for imagery
+    verification), where the terminal states 10/11 and idle 0 don't count.
+
+    Any problem reading the file reports "no update pending" — if we can't tell,
+    showing nothing beats showing a button that can't work.
+    """
+    try:
+        with open(DOB_STATUS_FILE, "r", encoding="utf-8") as f:
+            text = f.read().strip()
+        data = json.loads(text) if text else {}
+        if not isinstance(data, dict):
+            data = {}
+    except FileNotFoundError:
+        return {"available": False, "reboot": False, "processing": False}
+    except Exception as exc:
+        logger.info("could not read theDobinator status.json (%r)", exc)
+        return {"available": False, "reboot": False, "processing": False}
+
+    def flag(key: str) -> bool:
+        return data.get(key) in (1, True, "1")
+
+    try:
+        status_number = int(data.get("StatusNumber", 0) or 0)
+    except (TypeError, ValueError):
+        status_number = 0
+
+    processing = bool(
+        flag("Running") and status_number >= 1 and status_number not in (10, 11)
+    )
+    return {
+        "available": flag("UpdateAvailable"),
+        "reboot": flag("RebootRequired"),
+        "processing": processing,
+    }
+
+
+def apply_update(body: dict) -> tuple[bool, str]:
+    """Apply or schedule theDobinator's pending update by proxying to its API.
+
+    The reboot-vs-normal choice is made HERE from status.json rather than taken
+    from the request, so the two portals can never disagree about which variant
+    an update is. The caller only says whether to do it now or schedule it for
+    after the current drive.
+    """
+    schedule = bool(body.get("schedule"))
+    state = read_update_status()
+
+    if not state["available"]:
+        return False, "there is no update pending"
+    if state["processing"] and not schedule:
+        return False, "a drive is processing — the update has to be scheduled"
+
+    if state["reboot"]:
+        path = "/schedule-update-reboot" if schedule else "/update-reboot"
+    else:
+        path = "/schedule-update" if schedule else "/update"
+
+    url = f"{DOB_API_BASE}{path}"
+    logger.info("proxying update action to %s", url)
+    req = urllib.request.Request(
+        url,
+        data=b"{}",
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as res:
+            payload = json.loads(res.read().decode("utf-8") or "{}")
+        ok = bool(payload.get("ok", True))
+        return ok, str(payload.get("message") or path)
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = json.loads(exc.read().decode("utf-8")).get("message", "")
+        except Exception:
+            pass
+        return False, detail or f"theDobinator API returned HTTP {exc.code}"
+    except Exception as exc:
+        return False, (
+            "could not reach theDobinator API on port 5050 "
+            f"({exc.__class__.__name__}) — is the Dobinator Web API task running?"
+        )
+
+
+# ---------------------------------------------------------------------------
 # HTTP handler
 # ---------------------------------------------------------------------------
 # CORS is required even though the site and this API are on the same machine:
@@ -288,6 +399,9 @@ class LabelHandler(BaseHTTPRequestHandler):
         if path == "/print-defaults":
             self._send_json(200, {"ok": True, "defaults": read_label_defaults()})
             return
+        if path == "/update-status":
+            self._send_json(200, {"ok": True, **read_update_status()})
+            return
         self._send_json(404, {"ok": False, "error": "not found"})
 
     def _read_json_body(self) -> dict:
@@ -311,6 +425,12 @@ class LabelHandler(BaseHTTPRequestHandler):
             body = self._read_json_body()
             ok, msg = print_label(body)
             logger.info("print label: ok=%s msg=%s", ok, msg)
+            self._send_json(200 if ok else 500, {"ok": ok, "message": msg})
+            return
+        if path == "/apply-update":
+            body = self._read_json_body()
+            ok, msg = apply_update(body)
+            logger.info("apply update: ok=%s msg=%s", ok, msg)
             self._send_json(200 if ok else 500, {"ok": ok, "message": msg})
             return
         self._send_json(404, {"ok": False, "error": "not found"})
