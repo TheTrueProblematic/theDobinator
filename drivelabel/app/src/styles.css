@@ -588,52 +588,76 @@ button, input, select { font: inherit; color: inherit; }
   gap: .6rem;
 }
 
+/* The disc reproduces the real 0.94" round die-cut label: SHOTOVER wordmark
+   centred at the top, a left-aligned content block, then a bottom row of
+   QR + print date + CAGE. Monospace throughout to evoke the thermal print. */
 .preview-disc {
   position: relative;
-  width: 186px;
-  height: 186px;
+  /* Sized so even the worst case — a two-line Customer pushing the QR block
+     down — keeps every corner clear of the die-cut ring. */
+  width: 224px;
+  height: 224px;
   border-radius: 50%;
   background-color: var(--surface);
   color: var(--fg);
   border: 1px solid var(--border-strong);
   box-shadow: var(--shadow-sm);
-  display: grid;
-  place-items: center;
+  display: flex;
+  font-family: var(--font-mono);
 }
 
-/* Inner dashed ring, echoing the die-cut edge of the real round label. */
+/* Inner dashed ring, echoing the die-cut edge of the real round label. Held
+   close to the rim so it clears the bottom-left corner of the QR block, which
+   reaches ~90% of the radius (as it does on the real label). */
 .preview-disc::before {
   content: "";
   position: absolute;
-  inset: 9px;
+  inset: 5px;
   border-radius: 50%;
   border: 1px dashed var(--border-strong);
+  pointer-events: none;
 }
 
+/* Inscribed content box. Kept under ~72% of the diameter so even the bottom-left
+   corner of the QR block stays clear of the curve. */
 .preview-inner {
   position: relative;
-  width: 74%;
+  margin: auto;
+  width: 71%;
+  display: flex;
+  flex-direction: column;
+  gap: .24rem;
+  min-width: 0;
+}
+
+.preview-wordmark {
+  align-self: center;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: .28rem;
-  text-align: center;
-}
-
-.preview-cage {
-  font-family: var(--font-mono);
-  font-size: .57rem;
-  letter-spacing: .17em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-
-.preview-customer {
-  font-size: .95rem;
+  font-size: .58rem;
   font-weight: 700;
-  line-height: 1.15;
+  letter-spacing: .12em;
+  line-height: 1.05;
+  color: var(--fg);
+}
+
+.preview-lines {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.preview-line {
+  font-size: .64rem;
+  line-height: 1.32;
   color: var(--fg);
   overflow-wrap: anywhere;
+}
+
+/* Customer may run long, so it gets two lines; everything else stays on one so
+   the bottom row can't be pushed off the disc. */
+.preview-customer {
   display: -webkit-box;
   -webkit-line-clamp: 2;
   line-clamp: 2;
@@ -642,38 +666,38 @@ button, input, select { font: inherit; color: inherit; }
 }
 
 .preview-purpose {
-  font-size: .74rem;
-  line-height: 1.25;
-  color: var(--fg-2);
-  overflow-wrap: anywhere;
-  display: -webkit-box;
-  -webkit-line-clamp: 1;
-  line-clamp: 1;
-  -webkit-box-orient: vertical;
+  white-space: nowrap;
   overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.preview-customer.is-empty,
-.preview-purpose.is-empty,
-.preview-box.is-empty { color: var(--muted); }
-
-.preview-customer.is-empty { font-weight: 500; }
-
-.preview-foot {
+.preview-bottom {
   display: flex;
-  align-items: center;
-  gap: .32rem;
-  margin-top: .1rem;
+  align-items: flex-start;
+  gap: .4rem;
+  margin-top: .04rem;
 }
 
-.preview-qr { width: 13px; height: 13px; color: var(--fg-2); }
-
-.preview-box {
-  font-family: var(--font-mono);
-  font-size: .6rem;
-  letter-spacing: .07em;
-  color: var(--fg-2);
+.preview-qr {
+  flex-shrink: 0;
+  width: 46px;
+  height: 46px;
+  color: var(--fg);
 }
+
+.preview-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding-top: .1rem;
+  font-size: .58rem;
+  line-height: 1.42;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+/* Placeholder text for fields the operator hasn't filled in yet. */
+.preview-inner .is-empty { color: var(--muted); }
 
 .preview-caption {
   font-family: var(--font-mono);
@@ -796,7 +820,6 @@ button, input, select { font: inherit; color: inherit; }
 @media (max-width: 460px) {
   .brand-mark { width: 36px; height: 36px; }
   .brand-mark svg { width: 19px; height: 19px; }
-  .preview-disc { width: 164px; height: 164px; }
   .toast { left: 1rem; right: 1rem; transform: none; max-width: none; width: auto; }
   @keyframes toastIn {
     from { opacity: 0; transform: translateY(10px); }

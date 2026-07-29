@@ -150,6 +150,36 @@ can never go out by accident.
 **What operators don't see** is Mode and all seven printer settings. Those are
 pre-filled from `label.json` and submitted normally; they're just hidden.
 
+### The label preview
+
+The round disc next to the form reproduces the **real** printed label, laid out
+from a photo of an actual print:
+
+```
+      SHOT            <- wordmark, centred at the top
+      OVER
+ Customer             <- left-aligned content block
+ Purpose
+ Box #: 000000
+ [QR]  2026-07-29     <- QR bottom-left, print date + CAGE stacked to its right
+       Cage
+       5ET05
+```
+
+Only printed fields appear. Hardware and Prepared By go to the master records
+file rather than onto the label, so leaving them out doubles as an explanation of
+why. The wordmark, the date and the "Cage" caption come from driveLabelPrinter's
+own template, so they're fixed in `LabelPreview.jsx` rather than driven by the
+form; the date is stamped from local date parts (not `toISOString()`, which would
+show tomorrow on an evening print).
+
+**If the printed label's layout ever changes, this has to change with it** — it's
+the one place in this repo that duplicates driveLabelPrinter's design. Geometry is
+verified against the circle: with a two-line Customer (the worst case) every
+corner still clears the die-cut ring by ~5px. If you add a line or grow a font,
+re-check that, because content near the bottom-left corner of the QR is what runs
+out of room first.
+
 ### The secret admin menu
 
 Five clicks on the brand mark (top-left circle) inside 3.5 seconds. A rolling
