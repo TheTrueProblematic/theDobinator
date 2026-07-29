@@ -6,6 +6,12 @@
       "runtimeExecutable": "python",
       "runtimeArgs": ["-m", "http.server", "8765", "--directory", "srvr"],
       "port": 8765
+    },
+    {
+      "name": "drivelabel",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "http.server", "8766", "--directory", "drivelabel/site"],
+      "port": 8766
     }
   ]
 }

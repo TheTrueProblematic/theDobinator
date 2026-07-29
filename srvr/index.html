@@ -27,13 +27,17 @@
         The Dobinator
       </span>
       <div class="topbar-actions">
-        <button id="printBtn" class="print-btn" aria-label="Print a drive label" title="Print Label">
+        <!-- Label printing lives on its own site now (drivelabel.c-nav.com,
+             served by IIS from drivelabel/site on this same PC). This is just a
+             link there — no modal, no print code in this portal. -->
+        <a id="printBtn" class="print-btn" href="http://drivelabel.c-nav.com/"
+           target="_blank" rel="noopener" aria-label="Print a drive label" title="Print Label">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M6 9V2h12v7"/>
             <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/>
             <rect x="6" y="14" width="12" height="8" rx="1"/>
           </svg>
-        </button>
+        </a>
         <button id="nameDriveBtn" class="name-drive-btn" aria-label="Name pending drives" title="Drives waiting to be named">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/>
@@ -132,90 +136,6 @@
         </div>
         <div class="modal-footer modal-footer-center">
           <button id="confirmDriveBtn" class="modal-btn modal-btn-confirm" disabled>Confirm</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Print Label Modal (drives the separate driveLabelPrinter project) -->
-    <div id="printModal" class="modal hidden" aria-hidden="true">
-      <div class="modal-backdrop" id="printModalBackdrop"></div>
-      <div class="modal-content">
-        <div class="modal-header">
-          <h2 class="modal-title">Print Label</h2>
-          <button id="closePrintBtn" class="modal-close" aria-label="Close modal">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
-          </button>
-        </div>
-        <div class="modal-body">
-          <label class="form-field">
-            <span class="form-label">Mode</span>
-            <select id="printMode" class="form-input">
-              <option value="print">Print &amp; record serial</option>
-              <option value="test">Test print (no record)</option>
-              <option value="render">Render PDF only (no print)</option>
-            </select>
-          </label>
-
-          <div class="form-section">Label content</div>
-          <label class="form-field">
-            <span class="form-label">Customer</span>
-            <input id="printCustomer" class="form-input" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. Australia" />
-          </label>
-          <label class="form-field">
-            <span class="form-label">Purpose</span>
-            <input id="printPurpose" class="form-input" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. Master" />
-          </label>
-          <label class="form-field">
-            <span class="form-label">Box Serial (printed as “Box #”, optional)</span>
-            <input id="printBoxSerial" class="form-input" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. 000000" />
-          </label>
-          <label class="form-field">
-            <span class="form-label">Hardware (recorded, not printed)</span>
-            <input id="printHardware" class="form-input" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. Other" />
-          </label>
-          <label class="form-field">
-            <span class="form-label">Prepared By (recorded, not printed)</span>
-            <input id="printPreparedBy" class="form-input" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. Max" />
-          </label>
-
-          <div class="form-section">Printer settings</div>
-          <label class="form-field">
-            <span class="form-label">Printer Name</span>
-            <input id="printPrinterName" class="form-input" type="text" autocomplete="off" spellcheck="false" placeholder="Brother QL-810W" />
-          </label>
-          <label class="form-field">
-            <span class="form-label">CAGE Code</span>
-            <input id="printCageCode" class="form-input" type="text" autocomplete="off" spellcheck="false" placeholder="5ET05" />
-          </label>
-          <label class="form-field">
-            <span class="form-label">QR URL</span>
-            <input id="printQrUrl" class="form-input" type="text" autocomplete="off" spellcheck="false" placeholder="churchillnavigation.com/specifications" />
-          </label>
-          <label class="form-field">
-            <span class="form-label">Copies</span>
-            <input id="printCopies" class="form-input" type="number" min="1" step="1" value="1" />
-          </label>
-          <label class="form-field">
-            <span class="form-label">Label Media</span>
-            <input id="printLabelMedia" class="form-input" type="text" autocomplete="off" spellcheck="false" placeholder="0.94&quot; Dia" />
-          </label>
-          <label class="form-field">
-            <span class="form-label">Print Scale</span>
-            <select id="printScale" class="form-input">
-              <option value="noscale">No scaling (exact size)</option>
-              <option value="fit">Fit</option>
-              <option value="shrink">Shrink</option>
-            </select>
-          </label>
-          <label class="form-field">
-            <span class="form-label">Master Records Path</span>
-            <input id="printMasterPath" class="form-input" type="text" autocomplete="off" spellcheck="false" placeholder="Z:\SerialNumbers\SERIAL_NUMBERS.txt" />
-          </label>
-
-          <div id="printStatus" class="print-status" hidden></div>
-        </div>
-        <div class="modal-footer modal-footer-center">
-          <button id="confirmPrintBtn" class="modal-btn modal-btn-confirm">Print Label</button>
         </div>
       </div>
     </div>

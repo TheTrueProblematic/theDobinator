@@ -5,7 +5,14 @@ srvr/.DS_Store
 .DS_Store
 /src/__pycache__
 /srvr/__pycache__
+__pycache__/
 /local
+
+# Drive Label site: the React SOURCE lives in drivelabel/app and its build output
+# in drivelabel/site. site/ is deliberately COMMITTED — the office PC has no
+# Node, so the finished files have to arrive via git. Only deps are ignored.
+drivelabel/app/node_modules/
+drivelabel/app/.vite/
 
 
 # Secrets — never commit. Holds the GitHub fine-grained PAT used by the update watcher.

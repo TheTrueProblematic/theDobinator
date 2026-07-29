@@ -16,13 +16,11 @@ POST /update-reboot    -> launches git_update.py --reboot now (pull, clear flag,
 POST /schedule-update-reboot -> schedules a reboot-update for after the current drive
 POST /submit-drive     -> writes a blank-drive submission ({token,name,country})
                           into logs/submissions/ for dobd.py to format + queue
-GET  /print-defaults   -> returns the installed driveLabelPrinter label.json so the
-                          WebUI can pre-fill the Print Label form
-POST /print-label      -> renders + prints one drive label via the separate
-                          driveLabelPrinter project (at C:/driveLabelPrinter); runs
-                          synchronously and returns the result
 GET  /health           -> liveness check; returns 200 {"ok": true}
 *    *                 -> 404
+
+Label printing is NOT here. It moved to its own site (drivelabel.c-nav.com) and
+its own server, drivelabel/label_api.py on port 5051.
 
 Runs on 0.0.0.0:5050 by default. Configure on the Windows box via Task
 Scheduler so it starts at boot. See HostingInstructions.md.
@@ -234,179 +232,6 @@ def submit_drive(body: dict) -> tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
-# Drive-label printing (driveLabelPrinter integration)
-# ---------------------------------------------------------------------------
-#
-# The driveLabelPrinter project is a *separate* repo installed alongside
-# theDobinator on the host. Per deployment it lives at C:\driveLabelPrinter
-# (override with DOB_LABEL_PRINTER_DIR). We never modify it — we just write a
-# config it accepts (--config) and invoke its entry point in its own venv.
-
-LABEL_PRINTER_DIR     = os.environ.get("DOB_LABEL_PRINTER_DIR", r"C:\driveLabelPrinter")
-LABEL_PRINTER_PY      = os.path.join(LABEL_PRINTER_DIR, "src", "driveLabelPrinter.py")
-LABEL_PRINTER_VENV_PY = os.path.join(LABEL_PRINTER_DIR, "local", "venv", "Scripts", "python.exe")
-LABEL_PRINTER_CONFIG  = os.path.join(LABEL_PRINTER_DIR, "label.json")
-# The per-print config we hand to driveLabelPrinter via --config (kept in our
-# own logs/ dir so we only ever write inside theDobinator).
-LABEL_JOB_CONFIG      = os.path.join(LOGS_DIR, "label_print.json")
-
-# Mirrors the example label.json shipped with driveLabelPrinter; used to
-# pre-fill the WebUI form when the real label.json can't be read.
-DEFAULT_LABEL_CONFIG = {
-    "printer_name": "Brother QL-810W",
-    "cage_code": "5ET05",
-    "qr_url": "churchillnavigation.com/specifications",
-    "copies": 1,
-    "label_media": "0.94\" Dia",
-    "print_scale": "noscale",
-    "master_records_path": "Z:\\SerialNumbers\\SERIAL_NUMBERS.txt",
-    "label": {
-        "customer": "",
-        "purpose": "",
-        "hardware": "Other",
-        "prepared_by": "",
-        "box_serial": "",
-    },
-}
-
-_VALID_SCALES = ("noscale", "fit", "shrink")
-# WebUI mode -> driveLabelPrinter.py CLI args.
-_PRINT_MODES = {
-    "print":  [],                # real run: render, record a serial, and print
-    "test":   ["--test-print"],  # print a test label; records nothing
-    "render": ["--no-print"],    # render the PDF only; no print, no record
-}
-
-
-def read_label_defaults() -> dict:
-    """Best-effort read of the installed label.json so the WebUI can pre-fill the
-    print form with the operator's current values. Falls back to the bundled
-    example defaults if the file is missing or unreadable."""
-    try:
-        with open(LABEL_PRINTER_CONFIG, "r", encoding="utf-8-sig") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            data.pop("_comment", None)
-            return data
-    except Exception as exc:
-        logger.info("could not read label.json defaults (%s); using built-ins", exc)
-    return DEFAULT_LABEL_CONFIG
-
-
-def _build_label_config(body: dict) -> tuple[dict | None, str]:
-    """Validate the WebUI form body and assemble a driveLabelPrinter config.
-    Mirrors the validation in driveLabelPrinter's config.py. Returns
-    (config_dict, "") on success or (None, error_message)."""
-    def s(key: str, default: str = "") -> str:
-        return str(body.get(key, default) or "").strip()
-
-    printer_name = s("printer_name")
-    cage_code = s("cage_code")
-    qr_url = s("qr_url")
-    if not printer_name or not cage_code or not qr_url:
-        return None, "printer name, CAGE code, and QR URL are all required"
-
-    raw_copies = body.get("copies", 1)
-    try:
-        copies = int(raw_copies)
-    except (TypeError, ValueError):
-        return None, "copies must be a whole number"
-    if copies < 1:
-        return None, "copies must be at least 1"
-
-    label_media = s("label_media") or '0.94" Dia'
-
-    print_scale = s("print_scale").lower() or "noscale"
-    if print_scale not in _VALID_SCALES:
-        return None, f"print scale must be one of: {', '.join(_VALID_SCALES)}"
-
-    master_records_path = s("master_records_path") or r"Z:\SerialNumbers\SERIAL_NUMBERS.txt"
-
-    label_raw = body.get("label") if isinstance(body.get("label"), dict) else {}
-    def ls(key: str) -> str:
-        return str(label_raw.get(key, "") or "").strip()
-
-    config = {
-        "printer_name": printer_name,
-        "cage_code": cage_code,
-        "qr_url": qr_url,
-        "copies": copies,
-        "label_media": label_media,
-        "print_scale": print_scale,
-        "master_records_path": master_records_path,
-        "label": {
-            "customer": ls("customer"),
-            "purpose": ls("purpose"),
-            "hardware": ls("hardware"),
-            "prepared_by": ls("prepared_by"),
-            "box_serial": ls("box_serial"),
-        },
-    }
-    return config, ""
-
-
-def print_label(body: dict) -> tuple[bool, str]:
-    """Render + print one drive label via the driveLabelPrinter project.
-
-    Writes the form values to a temp config and runs driveLabelPrinter.py with
-    --config pointing at it. Runs synchronously (it's a short one-shot, and the
-    server is threaded) so we can report real success/failure to the WebUI."""
-    if not os.path.isfile(LABEL_PRINTER_PY):
-        return False, f"driveLabelPrinter not found at {LABEL_PRINTER_PY}"
-
-    if os.path.isfile(LABEL_PRINTER_VENV_PY):
-        python_exe = LABEL_PRINTER_VENV_PY
-    else:
-        python_exe = sys.executable
-        logger.info("label printer venv missing at %s; falling back to %s",
-                    LABEL_PRINTER_VENV_PY, python_exe)
-
-    mode = str(body.get("mode", "print")).strip().lower() or "print"
-    if mode not in _PRINT_MODES:
-        return False, f"unknown print mode: {mode!r}"
-
-    config, err = _build_label_config(body)
-    if config is None:
-        return False, err
-
-    try:
-        os.makedirs(LOGS_DIR, exist_ok=True)
-        with open(LABEL_JOB_CONFIG, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2)
-    except Exception as exc:
-        return False, f"failed to write label config: {exc!r}"
-
-    cmd = [python_exe, LABEL_PRINTER_PY, "--config", LABEL_JOB_CONFIG] + _PRINT_MODES[mode]
-    logger.info("printing label: mode=%s cmd=%s", mode, cmd)
-    try:
-        flags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
-        proc = subprocess.run(
-            cmd,
-            cwd=LABEL_PRINTER_DIR,
-            creationflags=flags,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=180,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-    except subprocess.TimeoutExpired:
-        return False, "printing timed out after 180s — check the printer and the driveLabelPrinter logs"
-    except Exception as exc:
-        return False, f"failed to launch label printer: {exc!r}"
-
-    if proc.returncode == 0:
-        verb = {"print": "printed", "test": "test-printed", "render": "rendered"}[mode]
-        return True, f"label {verb} successfully"
-
-    tail = (proc.stdout or "").strip().splitlines()[-6:]
-    detail = " / ".join(line.strip() for line in tail if line.strip()) or f"exit code {proc.returncode}"
-    return False, f"label printer failed (exit {proc.returncode}): {detail}"
-
-
-# ---------------------------------------------------------------------------
 # HTTP handler
 # ---------------------------------------------------------------------------
 
@@ -446,9 +271,6 @@ class PowerHandler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == "/health":
             self._send_json(200, {"ok": True, "service": "dob_srvr_api"})
-            return
-        if path == "/print-defaults":
-            self._send_json(200, {"ok": True, "defaults": read_label_defaults()})
             return
         self._send_json(404, {"ok": False, "error": "not found"})
 
@@ -499,12 +321,6 @@ class PowerHandler(BaseHTTPRequestHandler):
             ok, msg = submit_drive(body)
             logger.info("drive submission: ok=%s msg=%s", ok, msg)
             self._send_json(200 if ok else 400, {"ok": ok, "message": msg})
-            return
-        if path == "/print-label":
-            body = self._read_json_body()
-            ok, msg = print_label(body)
-            logger.info("print label: ok=%s msg=%s", ok, msg)
-            self._send_json(200 if ok else 500, {"ok": ok, "message": msg})
             return
         self._send_json(404, {"ok": False, "error": "not found"})
 

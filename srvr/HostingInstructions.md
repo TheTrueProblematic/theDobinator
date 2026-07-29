@@ -1,5 +1,11 @@
 # Hosting The Dobinator portal on IIS
 
+> **Looking for the label printer?** It's a separate site now —
+> `drivelabel.c-nav.com`, hosted on this same PC as a second IIS site
+> distinguished by host header. See **`drivelabel/README.md`**. Nothing in this
+> file needs to change for it: theDobinator's site keeps its blank-hostname
+> binding on port 80, and its API keeps port 5050.
+
 This walks through setting up the portal end-to-end on a Windows box with a fixed local IP. Two things need to run on the machine:
 
 1. **IIS** — serves the static portal files from this `srvr/` folder.

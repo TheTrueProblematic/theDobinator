@@ -125,6 +125,9 @@ html, body {
               box-shadow .25s var(--ease);
   outline: none;
   position: relative;
+  /* .print-btn is an <a> to drivelabel.c-nav.com rather than a <button>, so it
+     needs the link underline suppressed to match the other topbar controls. */
+  text-decoration: none;
 }
 
 .power-btn:hover, .history-btn:hover, .pending-btn:hover, .name-drive-btn:hover, .print-btn:hover {
@@ -533,38 +536,6 @@ body[data-running="0"] .power-btn {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--fg) 12%, transparent);
 }
 select.form-input { cursor: pointer; }
-
-/* Group heading inside a form (e.g. "Label content" / "Printer settings"). */
-.form-section {
-  font-size: .7rem;
-  letter-spacing: .18em;
-  text-transform: uppercase;
-  color: var(--muted);
-  margin-top: .35rem;
-  padding-bottom: .4rem;
-  border-bottom: 1px solid var(--card-border);
-}
-
-/* Inline result line under the Print Label form. */
-.print-status {
-  font-size: .85rem;
-  line-height: 1.45;
-  padding: .7rem .85rem;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--card-border);
-  word-break: break-word;
-}
-.print-status.is-pending { color: var(--muted); }
-.print-status.is-success {
-  color: var(--success);
-  border-color: color-mix(in srgb, var(--success) 40%, var(--card-border));
-  background: color-mix(in srgb, var(--success) 8%, transparent);
-}
-.print-status.is-error {
-  color: var(--danger);
-  border-color: color-mix(in srgb, var(--danger) 40%, var(--card-border));
-  background: color-mix(in srgb, var(--danger) 8%, transparent);
-}
 
 /* ---------- Pending-drive list items ---------- */
 
