@@ -48,10 +48,9 @@ SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))                    # ..
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)                                   # ...\theDobinator
 LOGS_DIR    = os.path.join(PROJECT_DIR, "logs")
 LOG_FILE    = os.path.join(LOGS_DIR, "labelApi.log")
-# theDobinator's status file — the source of truth for whether an update is
-# pending. It sits in the same repo, so we read it off disk instead of making a
-# cross-origin HTTP call to the other site (which would need CORS headers added
-# to theDobinator's web.config).
+# theDobinator's status file — read only for "is a drive mid-build". It sits in
+# the same repo, so we read it off disk instead of making a cross-origin HTTP call
+# to the other site (which would need CORS headers added to its web.config).
 DOB_STATUS_FILE = os.path.join(PROJECT_DIR, "srvr", "status.json")
 
 HOST = os.environ.get("LABEL_API_HOST", "0.0.0.0")
@@ -59,6 +58,11 @@ PORT = int(os.environ.get("LABEL_API_PORT", "5051"))
 # theDobinator's companion API. Update actions are proxied there rather than
 # reimplemented, so there is only ever one copy of the update logic.
 DOB_API_BASE = os.environ.get("DOB_API_BASE", "http://127.0.0.1:5050")
+
+# Update availability is published by srvr_api.py's watcher into
+# logs/update_state.json; we share its reader rather than re-parsing the file.
+sys.path.insert(0, os.path.join(PROJECT_DIR, "configs", "git_updater"))
+import update_check  # noqa: E402  (deliberately after the sys.path tweak)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -264,43 +268,47 @@ def print_label(body: dict) -> tuple[bool, str]:
 # the *action* to its API on 5050.
 
 
-def read_update_status() -> dict:
-    """Read theDobinator's status.json and report the update state.
+def _read_processing() -> bool:
+    """
+    True when a drive is actively being worked, so an update can't be applied now.
 
-    `processing` mirrors isProcessing() in theDobinator's app.js: running, and on
-    an in-progress step (1–9 for build/format/country, 12–14 for imagery
-    verification), where the terminal states 10/11 and idle 0 don't count.
-
-    Any problem reading the file reports "no update pending" — if we can't tell,
-    showing nothing beats showing a button that can't work.
+    Mirrors isProcessing() in theDobinator's app.js: running, and on an
+    in-progress step (1–9 build/format/country, 12–14 imagery verification) —
+    the terminal states 10/11 and idle 0 don't count.
     """
     try:
         with open(DOB_STATUS_FILE, "r", encoding="utf-8") as f:
             text = f.read().strip()
         data = json.loads(text) if text else {}
         if not isinstance(data, dict):
-            data = {}
+            return False
     except FileNotFoundError:
-        return {"available": False, "reboot": False, "processing": False}
+        return False
     except Exception as exc:
         logger.info("could not read theDobinator status.json (%r)", exc)
-        return {"available": False, "reboot": False, "processing": False}
+        return False
 
-    def flag(key: str) -> bool:
-        return data.get(key) in (1, True, "1")
-
+    running = data.get("Running") in (1, True, "1")
     try:
-        status_number = int(data.get("StatusNumber", 0) or 0)
+        n = int(data.get("StatusNumber", 0) or 0)
     except (TypeError, ValueError):
-        status_number = 0
+        n = 0
+    return bool(running and n >= 1 and n not in (10, 11))
 
-    processing = bool(
-        flag("Running") and status_number >= 1 and status_number not in (10, 11)
-    )
+
+def read_update_status() -> dict:
+    """Report whether an update is pending, needs a reboot, and is blocked.
+
+    Availability comes from logs/update_state.json — published by srvr_api.py's
+    always-on watcher, NOT from status.json. That's the whole point: status.json
+    only says anything useful while the bot is running, so reading it here meant
+    this site's update badge vanished whenever the bot was powered off.
+    """
+    state = update_check.read_update_state(LOGS_DIR)
     return {
-        "available": flag("UpdateAvailable"),
-        "reboot": flag("RebootRequired"),
-        "processing": processing,
+        "available": state["available"],
+        "reboot": state["reboot"],
+        "processing": _read_processing(),
     }
 
 

@@ -1,15 +1,23 @@
 // Top-level controller: polls status.json, hands off to render.js,
 // wires up the power button (which calls the companion API and re-polls fast).
 
-import { fetchStatus, togglePower, applyUpdate, scheduleUpdate, applyUpdateReboot, scheduleUpdateReboot, submitDrive } from './api.js';
+import { fetchStatus, fetchUpdateStatus, togglePower, applyUpdate, scheduleUpdate, applyUpdateReboot, scheduleUpdateReboot, submitDrive } from './api.js';
 import { render, clearCompletedHistory } from './render.js';
 import { COUNTRIES } from './countries.js';
 
 const POLL_INTERVAL_MS = 1000;
 const FAST_POLL_INTERVAL_MS = 250;
 const FAST_POLL_DURATION_MS = 5000;
+// Update availability is polled separately and far more slowly than status: it's
+// a badge, not live drive progress, and each check costs a GitHub round trip on
+// the server side.
+const UPDATE_POLL_INTERVAL_MS = 15000;
 
 let lastState = null;
+// Latest answer from the API's /update-status. Merged into the polled state below
+// so render.js keeps reading state.UpdateAvailable / state.RebootRequired and
+// doesn't need to know where they came from.
+let updateState = { available: false, reboot: false };
 let pollHandle = null;
 let fastPollHandle = null;
 let fastPollUntil = 0;
@@ -30,10 +38,25 @@ let promptHiddenByUser = false;
 
 async function poll() {
   const state = await fetchStatus();
+  // Overlay the separately-polled update flags. status.json no longer carries
+  // meaningful values for these — srvr_api.py owns them.
+  state.UpdateAvailable = updateState.available ? 1 : 0;
+  state.RebootRequired = updateState.reboot ? 1 : 0;
   if (render(state, lastState)) lastState = state;
   // The blank-drive popup is driven independently of render()'s change gate so
   // it always reflects the latest BlankDrives list.
   syncDrivePrompt(state);
+}
+
+async function pollUpdateStatus() {
+  try {
+    const res = await fetchUpdateStatus();
+    updateState = { available: !!(res && res.available), reboot: !!(res && res.reboot) };
+  } catch (err) {
+    // API unreachable — hide the badge rather than offering a button that can't
+    // work. The next tick will pick it back up.
+    updateState = { available: false, reboot: false };
+  }
 }
 
 function startNormalPolling() {
@@ -140,7 +163,7 @@ async function handleUpdateClick() {
       'Check that the companion API (srvr_api.py) is running on port 5050.'
     );
   } finally {
-    setTimeout(() => { updateInFlight = false; }, 800);
+    setTimeout(() => { updateInFlight = false; pollUpdateStatus(); }, 800);
   }
 }
 
@@ -379,8 +402,10 @@ function wireDelegatedEvents() {
 export async function start() {
   wireDelegatedEvents();
   populateCountrySelect();
-  await poll();           // initial paint, no flicker
+  await pollUpdateStatus();   // know the badge state before the first paint
+  await poll();               // initial paint, no flicker
   startNormalPolling();
+  setInterval(pollUpdateStatus, UPDATE_POLL_INTERVAL_MS);
 }
 
 // Auto-start unless a test harness has set window.__DOB_NO_AUTOSTART = true

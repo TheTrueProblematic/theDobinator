@@ -947,6 +947,15 @@ button, input, select { font: inherit; color: inherit; }
 @media (max-width: 460px) {
   .brand-mark { width: 36px; height: 36px; }
   .brand-mark svg { width: 19px; height: 19px; }
+
+  /* "Drive Label Printer" is too wide to sit on one line next to two 44px
+     buttons on a narrow phone, so let it wrap here rather than push the buttons
+     off the edge. Trimmed slightly so it usually still fits on one. */
+  .brand-name {
+    white-space: normal;
+    font-size: .88rem;
+    line-height: 1.15;
+  }
   .toast { left: 1rem; right: 1rem; transform: none; max-width: none; width: auto; }
   @keyframes toastIn {
     from { opacity: 0; transform: translateY(10px); }

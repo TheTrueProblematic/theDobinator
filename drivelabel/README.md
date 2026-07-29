@@ -214,8 +214,14 @@ update instead of applying it, and a reboot-update asks for confirmation first.
 
 It works without any cross-origin calls to the other site:
 
-- **State** comes from `GET /update-status`, which reads `srvr/status.json`
-  straight off disk. Same repo, so no CORS headers had to be added to
+- **State** comes from `GET /update-status`, which reads `logs/update_state.json`
+  off disk. That file is published by **`srvr_api.py`'s always-on update
+  watcher** — not by the bot — which is what makes the badge correct whether or
+  not theDobinator is powered on. (It used to read `UpdateAvailable` out of
+  `srvr/status.json`, which only says anything useful while the bot is running;
+  that's why this badge used to go stale and then vanish the moment the bot
+  started.) `processing` still comes from `status.json`, since that genuinely is
+  bot state. Same repo either way, so no CORS headers were needed on
   theDobinator's `web.config`.
 - **Actions** go through `POST /apply-update`, which proxies to theDobinator's own
   API on `127.0.0.1:5050`. The update logic is not duplicated here.

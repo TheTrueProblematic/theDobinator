@@ -96,6 +96,16 @@ export async function submitDrive({ token, name, country }) {
   return postToApi('/submit-drive', { token, name, country });
 }
 
+// Update availability comes from the API, NOT from status.json. srvr_api.py's
+// always-on watcher publishes it, so a pending update is still reported while the
+// bot is powered off — which is exactly when status.json can't tell us anything.
+export async function fetchUpdateStatus() {
+  const url = `${window.location.protocol}//${window.location.hostname}:${API_PORT}/update-status`;
+  const res = await fetch(url, { method: 'GET', mode: 'cors', cache: 'no-store' });
+  if (!res.ok) throw new Error(`/update-status returned HTTP ${res.status}`);
+  return res.json();
+}
+
 // NOTE: label printing used to live here (/print-defaults, /print-label). It
 // moved to its own site — drivelabel.c-nav.com, backed by drivelabel/label_api.py
 // on port 5051. This portal no longer talks to the label printer at all.

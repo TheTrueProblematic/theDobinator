@@ -289,9 +289,13 @@ export function render(state, prev) {
   // gate below) so the yellow update button appears/disappears immediately.
   const updateBtn = document.getElementById('updateBtn');
   if (updateBtn) {
-    // Only surface the update button while the Dobinator is actually running.
+    // NOT gated on state.Running any more. It used to be, because update state
+    // came from the bot and was therefore meaningless while it was off — which
+    // also meant a pending update was invisible exactly when it was safest to
+    // apply. srvr_api.py's always-on watcher now owns this (app.js overlays it
+    // onto the polled state), and git_update.py handles a not-running bot fine.
     const updateReady = state.UpdateAvailable === 1 || state.UpdateAvailable === true;
-    const showUpdate = state.Running === 1 && updateReady;
+    const showUpdate = updateReady;
     updateBtn.classList.toggle('is-visible', showUpdate);
     // A reboot-required update turns the button red and changes its hover label.
     const rebootReady = state.RebootRequired === 1 || state.RebootRequired === true;

@@ -21,7 +21,7 @@ export default function TopBar({
           type="button"
           className={`brand-mark${hinting ? ' is-hinting' : ''}${adminUnlocked ? ' is-unlocked' : ''}`}
           onClick={onSecretClick}
-          aria-label="Drive Label"
+          aria-label="Drive Label Printer"
         >
           <LabelMark />
           {adminUnlocked && (
@@ -31,7 +31,7 @@ export default function TopBar({
           )}
         </button>
         <span className="brand-text">
-          <span className="brand-name">Drive Label</span>
+          <span className="brand-name">Drive Label Printer</span>
           <span className="brand-sub">SHOTOVER</span>
         </span>
       </div>
@@ -40,11 +40,11 @@ export default function TopBar({
         {updateAvailable && (
           <UpdateButton reboot={updateReboot} busy={updateBusy} onClick={onUpdateClick} />
         )}
+        {/* Navigates in this tab on purpose: the two sites are a pair operators
+            bounce between, and opening a new tab each way piled them up. */}
         <a
           className="icon-btn has-tip"
           href={DOBINATOR_URL}
-          target="_blank"
-          rel="noopener"
           aria-label="Build a Drive"
         >
           <DriveIcon />

@@ -19,3 +19,13 @@ drivelabel/app/.vite/
 configs/keys.json
 
 logs/completedDrives.csv
+
+# Runtime state written by the running system — never commit it. update_state.json
+# in particular is rewritten by srvr_api.py's update watcher every couple of
+# minutes; committing it would mean `git reset --hard` during an update stomps the
+# live state with a stale snapshot.
+logs/update_state.json
+logs/label_print.json
+logs/autostart.flag
+logs/update_scheduled.flag
+logs/submissions/

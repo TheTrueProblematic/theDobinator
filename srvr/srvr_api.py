@@ -16,8 +16,16 @@ POST /update-reboot    -> launches git_update.py --reboot now (pull, clear flag,
 POST /schedule-update-reboot -> schedules a reboot-update for after the current drive
 POST /submit-drive     -> writes a blank-drive submission ({token,name,country})
                           into logs/submissions/ for dobd.py to format + queue
+GET  /update-status    -> whether an update is pending, needs a reboot, and whether
+                          a drive is processing (so the WebUI can show its badge)
 GET  /health           -> liveness check; returns 200 {"ok": true}
 *    *                 -> 404
+
+This process also OWNS update detection now (it used to live in dobd.py, which
+meant it stopped the moment the bot was powered off). A background thread polls
+GitHub and publishes logs/update_state.json; both portals read it from there.
+
+It also restarts the bot after an update-driven reboot — see maybe_autostart().
 
 Label printing is NOT here. It moved to its own site (drivelabel.c-nav.com) and
 its own server, drivelabel/label_api.py on port 5051.
@@ -34,6 +42,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from logging.handlers import RotatingFileHandler
@@ -51,9 +60,22 @@ UPDATE_SCHEDULED_FLAG = os.path.join(LOGS_DIR, "update_scheduled.flag")
 SUBMISSIONS_DIR = os.path.join(LOGS_DIR, "submissions")
 STATUS_FILE = os.path.join(SCRIPT_DIR, "status.json")
 LOG_FILE    = os.path.join(SCRIPT_DIR, "srvr_api.log")
+# Written by git_update.py right before an update-driven reboot; consumed once at
+# startup by maybe_autostart() to bring the bot back up.
+AUTOSTART_FLAG = os.path.join(LOGS_DIR, "autostart.flag")
 
 HOST = os.environ.get("DOB_API_HOST", "0.0.0.0")
 PORT = int(os.environ.get("DOB_API_PORT", "5050"))
+# Seconds between GitHub update checks. Conditional (ETag) requests make these
+# nearly free, but there's no reason to be chatty — dobd.py's old watcher fired
+# every 5s, which was only that frequent because it piggybacked the drive loop.
+UPDATE_CHECK_INTERVAL_S = int(os.environ.get("DOB_UPDATE_CHECK_INTERVAL", "120"))
+
+# The update checker is shared with git_update.py's world; configs/git_updater
+# isn't a package, so put it on the path the same way the rest of this project
+# resolves siblings.
+sys.path.insert(0, os.path.join(PROJECT_DIR, "configs", "git_updater"))
+import update_check  # noqa: E402  (deliberately after the sys.path tweak)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -232,6 +254,111 @@ def submit_drive(body: dict) -> tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
+# Update detection (moved here from dobd.py)
+# ---------------------------------------------------------------------------
+#
+# This lives in the API rather than the bot because the bot gets powered off, and
+# an update that's pending while the bot is off is exactly the case that used to
+# go unreported on both portals. This process runs from logon to shutdown.
+#
+# State is published to logs/update_state.json, NOT into srvr/status.json:
+# dobd.py writes status.json from several threads under an RLock, and that lock
+# can't stop a second *process* from interleaving a write.
+
+_update_checker = update_check.UpdateChecker(PROJECT_DIR, logger)
+
+
+def _update_watch_loop() -> None:
+    """Poll GitHub forever, publishing update state. Never lets an error escape."""
+    if not _update_checker.has_pat:
+        logger.info(
+            "no GitHub PAT in configs/keys.json — update detection is disabled. "
+            "Paste a token into the GITHUB_PAT field and restart this task."
+        )
+        return
+    while True:
+        try:
+            _update_checker.check_once()
+        except Exception as exc:
+            logger.info("update check raised (non-fatal): %r", exc)
+        time.sleep(UPDATE_CHECK_INTERVAL_S)
+
+
+def start_update_watcher() -> None:
+    threading.Thread(target=_update_watch_loop, name="update-watcher", daemon=True).start()
+
+
+def read_status_processing() -> bool:
+    """
+    True when a drive is actively being worked, so an update can't be applied
+    right now. Mirrors isProcessing() in app.js: running, and on an in-progress
+    step (1–9 build/format/country, 12–14 imagery verification) — the terminal
+    states 10/11 and idle 0 don't count.
+    """
+    try:
+        with open(STATUS_FILE, "r", encoding="utf-8") as f:
+            text = f.read().strip()
+        data = json.loads(text) if text else {}
+        if not isinstance(data, dict):
+            return False
+    except Exception:
+        return False
+    running = data.get("Running") in (1, True, "1")
+    try:
+        n = int(data.get("StatusNumber", 0) or 0)
+    except (TypeError, ValueError):
+        n = 0
+    return bool(running and n >= 1 and n not in (10, 11))
+
+
+def update_status_payload() -> dict:
+    state = update_check.read_update_state(LOGS_DIR)
+    return {
+        "available": state["available"],
+        "reboot": state["reboot"],
+        "processing": read_status_processing(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Auto-start after an update-driven reboot
+# ---------------------------------------------------------------------------
+
+def maybe_autostart() -> None:
+    """
+    Bring the bot back up after an update that restarted the PC.
+
+    git_update.py writes logs/autostart.flag just before `shutdown /r`. Only that
+    path writes it, so an ordinary manual reboot still leaves the bot off — this
+    restores the state an update took away rather than changing what a reboot
+    means. The flag is consumed (deleted) whether or not the launch succeeds, so a
+    failure can't leave the box starting the bot on every future logon.
+    """
+    if not os.path.isfile(AUTOSTART_FLAG):
+        return
+    try:
+        with open(AUTOSTART_FLAG, "r", encoding="utf-8") as f:
+            wanted = f.read().strip().lower() in ("1", "true", "yes")
+    except Exception:
+        wanted = False
+    try:
+        os.remove(AUTOSTART_FLAG)
+    except Exception as exc:
+        logger.info("could not clear autostart flag: %r", exc)
+
+    if not wanted:
+        return
+    if _is_dobd_running():
+        logger.info("autostart requested but dobd.py is already running; nothing to do.")
+        return
+
+    # dobWin.bat is a TOGGLE, so this is only safe because we just confirmed the
+    # bot isn't running — otherwise it would shut it back down.
+    ok, msg = trigger_power_toggle()
+    logger.info("autostart after update: ok=%s msg=%s", ok, msg)
+
+
+# ---------------------------------------------------------------------------
 # HTTP handler
 # ---------------------------------------------------------------------------
 
@@ -271,6 +398,9 @@ class PowerHandler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == "/health":
             self._send_json(200, {"ok": True, "service": "dob_srvr_api"})
+            return
+        if path == "/update-status":
+            self._send_json(200, {"ok": True, **update_status_payload()})
             return
         self._send_json(404, {"ok": False, "error": "not found"})
 
@@ -386,6 +516,10 @@ def main():
     logger.info("dob_srvr_api starting on %s:%d (project=%s)", HOST, PORT, PROJECT_DIR)
     logger.info("dobWin.bat path: %s (exists=%s)", DOB_BAT, os.path.isfile(DOB_BAT))
     reset_status_if_bot_down()
+    # Scrub stale status FIRST, then bring the bot back if an update took it down —
+    # otherwise the scrub would wipe the state the restarting bot just published.
+    maybe_autostart()
+    start_update_watcher()
     server = ThreadingHTTPServer((HOST, PORT), PowerHandler)
     try:
         server.serve_forever()

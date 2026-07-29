@@ -67,25 +67,12 @@ SAVED_QUEUE_FILE = os.path.join(LOGS_DIR, "drive_queue.json")
 # dobd.py consumes them, formats+queues the matching drive, and deletes the file.
 SUBMISSIONS_DIR = os.path.join(LOGS_DIR, "submissions")
 
-# --- GitHub update watcher configuration ---
-# Used purely to poll for new commits via cheap HTTP conditional (ETag)
-# requests so we can light up the "update available" indicator in the WebUI
-# without burning the rate limit.
-GITHUB_REPO = "TheTrueProblematic/theDobinator"
-GITHUB_BRANCH = "main"
-GITHUB_API_URL = (
-    f"https://api.github.com/repos/{GITHUB_REPO}/commits"
-    f"?sha={GITHUB_BRANCH}&per_page=1"
-)
-# Contents API for the reboot-required flag file on the remote. When a new commit
-# is detected, the watcher reads this to decide whether the *incoming* update
-# needs a full PC restart (red update button) vs a normal update (yellow).
-GITHUB_FLAG_API_URL = (
-    f"https://api.github.com/repos/{GITHUB_REPO}/contents/configs/reboot_required.flag"
-    f"?ref={GITHUB_BRANCH}"
-)
-# How many 1-second drive-poll iterations between GitHub checks (~5 seconds).
-GITHUB_CHECK_EVERY = 5
+# --- GitHub update watcher ---
+# NOT here any more. The repo/branch/API constants and the polling live in
+# configs/git_updater/update_check.py, driven by srvr_api.py, so update detection
+# keeps running while the bot is powered off. dobd.py only still reads the PAT to
+# warn when it's missing.
+#
 # How many 1-second poll iterations between full physical-disk scans (~2 seconds).
 # Disk enumeration spawns PowerShell, so it is throttled relative to the loop.
 DISK_SCAN_EVERY = 2
@@ -312,23 +299,12 @@ class StatusManager:
 
             self._write_data(data)
 
-    def set_update_available(self, available):
-        """Flip the WebUI 'update available' indicator on or off."""
-        with self._lock:
-            data = self._read_data()
-            new_val = 1 if available else 0
-            if data.get("UpdateAvailable", 0) != new_val:
-                data["UpdateAvailable"] = new_val
-                self._write_data(data)
-
-    def set_reboot_required(self, required):
-        """Flip the WebUI 'this update needs a PC restart' indicator (red button)."""
-        with self._lock:
-            data = self._read_data()
-            new_val = 1 if required else 0
-            if data.get("RebootRequired", 0) != new_val:
-                data["RebootRequired"] = new_val
-                self._write_data(data)
+    # NOTE: set_update_available / set_reboot_required used to live here. The
+    # update indicator is no longer published through status.json at all — it
+    # comes from logs/update_state.json, written by srvr_api.py's watcher and
+    # served by both APIs' /update-status. Do NOT reintroduce a writer for those
+    # keys here: status.json is dobd.py's file, and having a second process write
+    # it is a cross-process race the RLock cannot guard.
 
     def set_verify_progress(self, run=None, max_runs=None, missing=None):
         """
@@ -2640,184 +2616,11 @@ def get_github_pat():
         return ""
 
 
-def get_local_head_sha():
-    """
-    Return the local checked-out commit SHA (lowercase hex) of the working tree,
-    or None if it can't be determined.
-
-    Reads git's plumbing files directly (.git/HEAD -> loose ref or packed-refs)
-    rather than shelling out to git.exe, because the watcher runs inside a
-    logon-spawned process where git is frequently not on PATH (the same reason
-    git_update.py uses find_git_executable). This is what lets the WebUI keep
-    showing "update pending" after a power cycle: we compare this local SHA to
-    the remote HEAD instead of only noticing pushes that happen while running.
-    """
-    git_dir = os.path.join(PROJECT_ROOT, ".git")
-    try:
-        with open(os.path.join(git_dir, "HEAD"), "r", encoding="utf-8") as f:
-            head = f.read().strip()
-    except Exception:
-        return None
-
-    # Detached HEAD: the file holds the SHA directly.
-    if not head.startswith("ref:"):
-        return head.lower() or None
-
-    ref = head[4:].strip()  # e.g. "refs/heads/main"
-    # 1) Loose ref file (.git/refs/heads/main).
-    try:
-        with open(os.path.join(git_dir, *ref.split("/")), "r", encoding="utf-8") as f:
-            sha = f.read().strip()
-        if sha:
-            return sha.lower()
-    except Exception:
-        pass
-    # 2) Packed refs (.git/packed-refs) — common right after a clone/reset.
-    try:
-        with open(os.path.join(git_dir, "packed-refs"), "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or line.startswith("^"):
-                    continue
-                parts = line.split(" ", 1)
-                if len(parts) == 2 and parts[1].strip() == ref:
-                    return parts[0].strip().lower()
-    except Exception:
-        pass
-    return None
-
-
-class UpdateWatcher:
-    """
-    Polls GitHub for new commits using cheap HTTP conditional requests so the
-    WebUI can show an "update available" indicator without burning the API
-    rate limit.
-
-    Approach (matches the rate-limit-free local watcher pattern):
-      * First request has no validator -> GitHub returns 200 + an ETag. We
-        store that ETag as our baseline AND compare the remote HEAD commit SHA
-        to our LOCAL checked-out SHA. If they differ, an update was already
-        pending before we started (e.g. the operator powered off without
-        applying it), so we flag it immediately. This is the fix for the bug
-        where power-cycling theDobinator hid a still-pending update.
-      * Every later request sends the stored ETag back in If-None-Match.
-          - 304 Not Modified  -> nothing changed, costs nothing.
-          - 200 OK            -> a new push happened. We refresh the stored
-                                 ETag and raise the update-available flag.
-
-    The actual HTTP call runs on a short-lived daemon thread so a slow network
-    never stalls the 1-second drive-detection loop.
-    """
-
-    def __init__(self, status_mgr, github_pat):
-        self.status_mgr = status_mgr
-        self.github_pat = github_pat
-        self.etag = None
-        self.update_available = False
-        self._lock = threading.Lock()
-        self._checking = False
-
-    def trigger_check(self):
-        """Kick off a non-blocking GitHub check (no-op if one is already running)."""
-        if self.update_available:
-            # Once we know an update is waiting there is nothing more to learn
-            # until the program restarts and re-baselines.
-            return
-        with self._lock:
-            if self._checking:
-                return
-            self._checking = True
-        threading.Thread(target=self._run_check, daemon=True).start()
-
-    def _run_check(self):
-        try:
-            self._check()
-        except Exception as e:
-            plog.debug(f"GitHub update check failed (non-fatal): {e}")
-        finally:
-            with self._lock:
-                self._checking = False
-
-    def _check(self):
-        req = urllib.request.Request(GITHUB_API_URL)
-        req.add_header("Authorization", f"Bearer {self.github_pat}")
-        req.add_header("Accept", "application/vnd.github+json")
-        req.add_header("X-GitHub-Api-Version", "2022-11-28")
-        req.add_header("User-Agent", "TheDobinator-UpdateWatcher")
-        if self.etag:
-            req.add_header("If-None-Match", self.etag)
-
-        try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                new_etag = resp.headers.get("ETag")
-                body = resp.read()  # drain the body (and parse the latest SHA)
-                remote_sha = self._parse_latest_sha(body)
-                if self.etag is None:
-                    # Establish the ETag baseline, then decide availability by
-                    # comparing the remote HEAD to our LOCAL checked-out commit.
-                    # If we restarted while behind origin/main, local != remote
-                    # and the update must still show as pending.
-                    self.etag = new_etag
-                    local_sha = get_local_head_sha()
-                    plog.debug(
-                        f"GitHub update watcher baseline: etag={new_etag} "
-                        f"remote={remote_sha} local={local_sha}"
-                    )
-                    if remote_sha and local_sha and remote_sha.lower() != local_sha.lower():
-                        plog.warning("Local commit is behind origin/main; an update is already pending.")
-                        self._flag_update_available()
-                else:
-                    # 200 with a previously-known ETag => a genuinely new push.
-                    self.etag = new_etag
-                    self._flag_update_available()
-        except urllib.error.HTTPError as e:
-            if e.code == 304:
-                plog.debug("GitHub update check: 304 Not Modified (up to date).")
-            else:
-                plog.warning(f"GitHub update check HTTP error {e.code}: {e.reason}")
-        except Exception as e:
-            plog.debug(f"GitHub update check network error (non-fatal): {e}")
-
-    def _parse_latest_sha(self, body):
-        """Pull the newest commit SHA out of the /commits?per_page=1 response."""
-        try:
-            data = json.loads(body.decode("utf-8", errors="replace"))
-            if isinstance(data, list) and data:
-                return str(data[0].get("sha", "")).strip() or None
-        except Exception as e:
-            plog.debug(f"Could not parse latest commit SHA: {e}")
-        return None
-
-    def _flag_update_available(self):
-        """Raise the WebUI update indicator and decide if it needs a PC restart."""
-        self.update_available = True
-        self.status_mgr.set_update_available(True)
-        plog.warning("A new version of theDobinator is available on GitHub.")
-        # Decide whether this incoming update needs a full PC restart by reading
-        # the remote reboot-required flag.
-        reboot = self._fetch_reboot_required()
-        self.status_mgr.set_reboot_required(reboot)
-        if reboot:
-            plog.warning("The available update is flagged as REQUIRING A PC RESTART.")
-
-    def _fetch_reboot_required(self):
-        """
-        Read the remote configs/reboot_required.flag via the GitHub contents API
-        (raw media type) and return True if it indicates a reboot is required.
-        Fails safe to False (yellow button) on any error.
-        """
-        try:
-            req = urllib.request.Request(GITHUB_FLAG_API_URL)
-            req.add_header("Authorization", f"Bearer {self.github_pat}")
-            req.add_header("Accept", "application/vnd.github.raw")
-            req.add_header("X-GitHub-Api-Version", "2022-11-28")
-            req.add_header("User-Agent", "TheDobinator-UpdateWatcher")
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                content = resp.read().decode("utf-8", errors="replace").strip().lower()
-            return content in ("1", "true", "yes")
-        except Exception as e:
-            plog.debug(f"Could not read remote reboot flag (assuming no reboot needed): {e}")
-            return False
+# NOTE: update detection used to live here (get_local_head_sha + UpdateWatcher).
+# It moved to configs/git_updater/update_check.py and is now driven by
+# srvr_api.py's always-on companion API, so a pending update is still reported
+# while the bot is powered OFF. dobd.py keeps only the *scheduled*-update
+# handling below, which it triggers once the current drive finishes.
 
 
 def is_update_scheduled():
@@ -3193,27 +2996,26 @@ def worker_thread(drive_queue, status_mgr):
 
 
 def main():
-    # The GitHub PAT is mandatory. It is read from the gitignored configs/keys.json
-    # (auto-created blank on first run). Without it, refuse to run and make the
-    # reason loud in every log so it is impossible to miss.
-    github_pat = get_github_pat()
-    if not github_pat:
+    # The GitHub PAT is only used for update DETECTION, which moved to
+    # srvr_api.py. This used to be a hard stop here; refusing to build drives
+    # over a token the bot no longer touches would be the wrong trade, so it is
+    # now a loud warning instead.
+    if not get_github_pat():
         msg = (
-            f"No GitHub PAT found. Open '{KEYS_FILE}', paste your token into the "
-            f"'{GITHUB_PAT_LABEL}' field, and restart. The Dobinator will NOT run "
-            f"without it."
+            f"No GitHub PAT found in '{KEYS_FILE}'. Drive builds are unaffected, but "
+            f"update detection (srvr_api.py's watcher) cannot run until the "
+            f"'{GITHUB_PAT_LABEL}' field is filled in."
         )
-        logging.critical(msg)
+        logging.warning(msg)
         _append_gitlog(msg)
-        status_mgr.update(running=0)
-        return
 
     # Reset transient run state, but DO NOT wipe the completed-drives history:
-    # it now lives permanently in completedDrives.csv. Refresh the last-24h
-    # view and clear any stale update indicator so a fresh launch starts clean.
+    # it now lives permanently in completedDrives.csv. Refresh the last-24h view.
+    #
+    # The update indicator is NOT reset here any more: it is published by
+    # srvr_api.py into logs/update_state.json, and clearing it on every bot start
+    # is what used to make a pending update vanish when the bot was cycled.
     status_mgr.update(status_number=0, running=1)
-    status_mgr.set_update_available(False)
-    status_mgr.set_reboot_required(False)
     status_mgr.refresh_completed_drives()
     # Wipe any blank/pending drive lists left over in status.json by a previous
     # run or a hard reboot, so a stale popup can never survive a restart.
@@ -3234,8 +3036,6 @@ def main():
     worker = threading.Thread(target=worker_thread, args=(drive_queue, status_mgr), daemon=True)
     worker.start()
 
-    # Background watcher that polls GitHub for new commits (cheap ETag checks).
-    update_watcher = UpdateWatcher(status_mgr, github_pat)
     poll_count = 0
 
     # Make sure the blank-drive submission inbox exists before we start polling.
@@ -3332,9 +3132,8 @@ def main():
                 if current_state.get("StatusNumber", 0) != 0:
                     status_mgr.update(status_number=0)
 
-            # Every 5th poll (~5 seconds) check GitHub for a newer version.
-            if poll_count % GITHUB_CHECK_EVERY == 0:
-                update_watcher.trigger_check()
+            # NOTE: no GitHub check here any more — srvr_api.py's always-on
+            # watcher owns that, so update state survives the bot being off.
 
             # Sleep briefly before checking again to prevent high CPU usage
             time.sleep(1)
