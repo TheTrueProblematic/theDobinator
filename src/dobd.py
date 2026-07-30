@@ -80,13 +80,11 @@ DISK_SCAN_EVERY = 2
 # --- Secrets / keys file ---
 # The GitHub fine-grained PAT is deliberately NOT stored in source (it would
 # leak the moment the repo is pushed). It lives in configs/keys.json, which is
-# gitignored. That file is auto-created with a blank key slot on first run, and
-# the program refuses to run until the key has been filled in.
+# gitignored. That file is auto-created with a blank key slot on first run. The
+# PAT is only used for update detection (now in srvr_api.py), so a missing key
+# warns rather than stopping the bot.
 CONFIGS_DIR = os.path.join(PROJECT_ROOT, "configs")
 KEYS_FILE = os.path.join(CONFIGS_DIR, "keys.json")
-# Committed flag (1/0) marking whether the published update needs a PC reboot.
-# Agents set it per AGENTS.md; git_update.py --reboot clears it after applying.
-REBOOT_FLAG_FILE = os.path.join(CONFIGS_DIR, "reboot_required.flag")
 GITLOG_FILE = os.path.join(LOGS_DIR, "gitLog.log")
 GITHUB_PAT_LABEL = "GITHUB_PAT"
 KEYS_FILE_TEMPLATE = {

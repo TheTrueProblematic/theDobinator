@@ -23,25 +23,41 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import urllib.error
 import urllib.request
 
 GITHUB_REPO = "TheTrueProblematic/theDobinator"
 GITHUB_BRANCH = "main"
+# Fetch a window of recent commits, not just the newest one: an update can span
+# several commits, and we need every message in the range being applied to decide
+# whether a restart is needed.
+GITHUB_COMMIT_WINDOW = 30
 GITHUB_API_URL = (
     f"https://api.github.com/repos/{GITHUB_REPO}/commits"
-    f"?sha={GITHUB_BRANCH}&per_page=1"
-)
-# Contents API for the reboot-required flag on the remote. Read when a new commit
-# is detected, to decide whether the *incoming* update needs a full PC restart
-# (red update button) or a normal one (yellow).
-GITHUB_FLAG_API_URL = (
-    f"https://api.github.com/repos/{GITHUB_REPO}/contents/configs/reboot_required.flag"
-    f"?ref={GITHUB_BRANCH}"
+    f"?sha={GITHUB_BRANCH}&per_page={GITHUB_COMMIT_WINDOW}"
 )
 
 GITHUB_PAT_LABEL = "GITHUB_PAT"
+
+# ---------------------------------------------------------------------------
+# "Does this update need a PC restart?"
+# ---------------------------------------------------------------------------
+# ⚠️ Decided PER COMMIT, from the COMMIT MESSAGE. Default is NO restart.
+#
+# This used to read a committed file, configs/reboot_required.flag, from the
+# remote. That was broken by design: a committed file persists until another
+# commit changes it, and the updater's clear_reboot_flag() only ever wrote to the
+# LOCAL copy, which never reaches GitHub. So the first commit that set it to 1
+# made every later commit claim "restart required" forever — which is exactly
+# what happened, and what this replaces.
+#
+# A commit message is per-commit by construction. There is no state to reset, and
+# nothing to remember to turn back off: say nothing and no restart is required.
+#
+# To require one, put [reboot] (or [restart]) anywhere in the commit message.
+REBOOT_MARKER_RE = re.compile(r"\[(?:reboot|restart)\]", re.IGNORECASE)
 
 EMPTY_STATE = {"available": False, "reboot": False, "remote_sha": None, "local_sha": None}
 
@@ -200,6 +216,7 @@ class UpdateChecker:
 
     def _check(self) -> dict:
         local_sha = get_local_head_sha(self.project_root)
+        previous = read_update_state(self.logs_dir)
 
         req = urllib.request.Request(GITHUB_API_URL)
         self._headers(req)
@@ -207,46 +224,46 @@ class UpdateChecker:
         if self.etag:
             req.add_header("If-None-Match", self.etag)
 
-        remote_sha = None
+        commits = None   # [(sha, message)], newest first; None => no fresh body
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 self.etag = resp.headers.get("ETag") or self.etag
-                remote_sha = self._parse_latest_sha(resp.read())
+                commits = self._parse_commits(resp.read())
         except urllib.error.HTTPError as exc:
             if exc.code == 304:
-                # Nothing changed upstream. Re-publish against the CURRENT local
-                # SHA anyway: an update we already knew about may have just been
-                # applied, and that only shows up as a change on our side.
-                previous = read_update_state(self.logs_dir)
-                remote_sha = previous.get("remote_sha")
+                # Nothing changed upstream — but still re-publish, because an
+                # update we already knew about may have just been applied, and
+                # that only shows up as a change on OUR side.
                 self.log.debug("update check: 304 Not Modified")
             else:
                 self.log.info("update check: GitHub HTTP %s %s", exc.code, exc.reason)
-                return read_update_state(self.logs_dir)
+                return previous
         except Exception as exc:
             self.log.debug("update check: network error (non-fatal): %r", exc)
-            return read_update_state(self.logs_dir)
+            return previous
+
+        remote_sha = commits[0][0] if commits else previous.get("remote_sha")
 
         if not remote_sha or not local_sha:
             self.log.debug(
                 "update check: inconclusive (remote=%s local=%s)", remote_sha, local_sha
             )
-            return read_update_state(self.logs_dir)
+            return previous
 
         available = remote_sha.lower() != local_sha.lower()
-        # Only ask for the reboot flag when there's actually an update, and only
-        # when we don't already know the answer for this exact commit.
-        previous = read_update_state(self.logs_dir)
-        if available and previous.get("remote_sha") == remote_sha and previous.get("available"):
-            reboot = bool(previous.get("reboot"))
-        elif available:
-            reboot = self._fetch_reboot_required()
+
+        if not available:
+            reboot = False
+        elif commits:
+            reboot = self._needs_restart(commits, local_sha)
             self.log.info(
                 "update available: local=%s remote=%s reboot=%s",
                 local_sha[:8], remote_sha[:8], reboot,
             )
         else:
-            reboot = False
+            # 304, so we have no message list this round — keep what we decided
+            # for this same remote commit last time.
+            reboot = bool(previous.get("reboot")) if previous.get("remote_sha") == remote_sha else False
 
         state = {
             "available": available,
@@ -260,30 +277,47 @@ class UpdateChecker:
             self.log.info("could not publish update state: %r", exc)
         return state
 
-    def _parse_latest_sha(self, body: bytes) -> str | None:
-        """Pull the newest commit SHA out of the /commits?per_page=1 response."""
+    def _parse_commits(self, body: bytes) -> list[tuple[str, str]] | None:
+        """Extract [(sha, message)] from the /commits response, newest first."""
         try:
             data = json.loads(body.decode("utf-8", errors="replace"))
-            if isinstance(data, list) and data:
-                return str(data[0].get("sha", "")).strip() or None
+            if not isinstance(data, list) or not data:
+                return None
+            out = []
+            for item in data:
+                sha = str(item.get("sha", "")).strip()
+                msg = ""
+                commit = item.get("commit")
+                if isinstance(commit, dict):
+                    msg = str(commit.get("message") or "")
+                if sha:
+                    out.append((sha, msg))
+            return out or None
         except Exception as exc:
-            self.log.debug("could not parse latest commit SHA: %r", exc)
-        return None
+            self.log.debug("could not parse commits response: %r", exc)
+            return None
 
-    def _fetch_reboot_required(self) -> bool:
+    def _needs_restart(self, commits: list[tuple[str, str]], local_sha: str) -> bool:
         """
-        Read the remote configs/reboot_required.flag via the contents API and
-        return True if it says a reboot is needed. Fails safe to False (yellow
-        button) on any error — a missed reboot prompt is recoverable, a spurious
-        PC restart is not.
+        True if any commit we're about to apply asks for a PC restart via
+        [reboot] / [restart] in its message.
+
+        Only the commits NEWER than what we have checked out count — walk the
+        newest-first list until we reach our own SHA. If our SHA isn't in the
+        window at all (more than GITHUB_COMMIT_WINDOW commits behind), consider
+        every fetched message: being that far behind is exactly when a restart is
+        likely warranted, so erring toward one is the safe direction.
         """
-        try:
-            req = urllib.request.Request(GITHUB_FLAG_API_URL)
-            self._headers(req)
-            req.add_header("Accept", "application/vnd.github.raw")
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                content = resp.read().decode("utf-8", errors="replace").strip().lower()
-            return content in ("1", "true", "yes")
-        except Exception as exc:
-            self.log.debug("could not read remote reboot flag (assuming no): %r", exc)
+        pending = []
+        for sha, msg in commits:
+            if local_sha and sha.lower() == local_sha.lower():
+                break
+            pending.append(msg)
+        if not pending:
             return False
+        for msg in pending:
+            if REBOOT_MARKER_RE.search(msg or ""):
+                first = (msg or "").strip().splitlines()[0][:72]
+                self.log.info("restart requested by commit message: %s", first)
+                return True
+        return False

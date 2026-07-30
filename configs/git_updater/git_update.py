@@ -55,22 +55,18 @@ logging.basicConfig(
 )
 
 MAIN_LOG_FILE = os.path.join(PROJECT_ROOT, "logs", "gitLog.log")
-REBOOT_FLAG_FILE = os.path.join(CONFIGS_DIR, "reboot_required.flag")
 # Read once by srvr_api.py at its next startup (the logon after the reboot) to
 # bring the bot back up. See maybe_autostart() there.
 AUTOSTART_FLAG_FILE = os.path.join(PROJECT_ROOT, "logs", "autostart.flag")
 
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
-
-def clear_reboot_flag():
-    """Set configs/reboot_required.flag back to 0 after a reboot-update is applied."""
-    try:
-        with open(REBOOT_FLAG_FILE, "w", encoding="utf-8") as f:
-            f.write("0\n")
-        logging.info("Cleared reboot_required.flag (set to 0).")
-    except Exception as e:
-        logging.error(f"Could not clear reboot_required.flag: {e}")
+# NOTE: clear_reboot_flag() used to live here, resetting
+# configs/reboot_required.flag after a reboot-update. That whole mechanism is
+# gone: "needs a restart" is now read per-commit from the commit message (see
+# REBOOT_MARKER_RE in update_check.py). Clearing the flag only ever touched the
+# LOCAL file, never the remote one the detector actually read, which is why a
+# single `1` made every later commit claim a restart was required.
 
 
 def request_autostart():
@@ -488,11 +484,9 @@ def do_update(reboot=False):
         log_event(f"Update failed: {e}")
     finally:
         if reboot:
-            # Reboot-required update: clear the local flag and restart the whole
-            # PC instead of just relaunching the bot. Ask for the bot to be
-            # started again on the far side, which the non-reboot path below gets
-            # for free by running dobWin.bat.
-            clear_reboot_flag()
+            # Reboot-required update: restart the whole PC instead of just
+            # relaunching the bot. Ask for the bot to be started again on the far
+            # side, which the non-reboot path below gets for free via dobWin.bat.
             request_autostart()
             reboot_pc()
             logging.info("git_update.py finished (reboot path).")
